@@ -81,21 +81,207 @@ pub struct GamepadId(pub u32);
 /// Key identifiers (W3C `code`-style names for physical keys).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-#[allow(missing_docs)]
 #[rustfmt::skip]
 pub enum KeyCode {
-    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
-    Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9,
-    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
-    ArrowUp, ArrowDown, ArrowLeft, ArrowRight,
-    Escape, Enter, Space, Tab, Backspace, Delete, Insert, Home, End, PageUp, PageDown,
-    ShiftLeft, ShiftRight, ControlLeft, ControlRight, AltLeft, AltRight, SuperLeft, SuperRight,
+    /// The `A` letter key.
+    A,
+    /// The `B` letter key.
+    B,
+    /// The `C` letter key.
+    C,
+    /// The `D` letter key.
+    D,
+    /// The `E` letter key.
+    E,
+    /// The `F` letter key.
+    F,
+    /// The `G` letter key.
+    G,
+    /// The `H` letter key.
+    H,
+    /// The `I` letter key.
+    I,
+    /// The `J` letter key.
+    J,
+    /// The `K` letter key.
+    K,
+    /// The `L` letter key.
+    L,
+    /// The `M` letter key.
+    M,
+    /// The `N` letter key.
+    N,
+    /// The `O` letter key.
+    O,
+    /// The `P` letter key.
+    P,
+    /// The `Q` letter key.
+    Q,
+    /// The `R` letter key.
+    R,
+    /// The `S` letter key.
+    S,
+    /// The `T` letter key.
+    T,
+    /// The `U` letter key.
+    U,
+    /// The `V` letter key.
+    V,
+    /// The `W` letter key.
+    W,
+    /// The `X` letter key.
+    X,
+    /// The `Y` letter key.
+    Y,
+    /// The `Z` letter key.
+    Z,
+    /// The `0` key on the main row.
+    Digit0,
+    /// The `1` key on the main row.
+    Digit1,
+    /// The `2` key on the main row.
+    Digit2,
+    /// The `3` key on the main row.
+    Digit3,
+    /// The `4` key on the main row.
+    Digit4,
+    /// The `5` key on the main row.
+    Digit5,
+    /// The `6` key on the main row.
+    Digit6,
+    /// The `7` key on the main row.
+    Digit7,
+    /// The `8` key on the main row.
+    Digit8,
+    /// The `9` key on the main row.
+    Digit9,
+    /// Function key F1.
+    F1,
+    /// Function key F2.
+    F2,
+    /// Function key F3.
+    F3,
+    /// Function key F4.
+    F4,
+    /// Function key F5.
+    F5,
+    /// Function key F6.
+    F6,
+    /// Function key F7.
+    F7,
+    /// Function key F8.
+    F8,
+    /// Function key F9.
+    F9,
+    /// Function key F10.
+    F10,
+    /// Function key F11.
+    F11,
+    /// Function key F12.
+    F12,
+    /// Up arrow.
+    ArrowUp,
+    /// Down arrow.
+    ArrowDown,
+    /// Left arrow.
+    ArrowLeft,
+    /// Right arrow.
+    ArrowRight,
+    /// Escape.
+    Escape,
+    /// Enter / Return.
+    Enter,
+    /// Space bar.
+    Space,
+    /// Tab.
+    Tab,
+    /// Backspace.
+    Backspace,
+    /// Delete.
+    Delete,
+    /// Insert.
+    Insert,
+    /// Home.
+    Home,
+    /// End.
+    End,
+    /// Page Up.
+    PageUp,
+    /// Page Down.
+    PageDown,
+    /// Left Shift.
+    ShiftLeft,
+    /// Right Shift.
+    ShiftRight,
+    /// Left Control.
+    ControlLeft,
+    /// Right Control.
+    ControlRight,
+    /// Left Alt.
+    AltLeft,
+    /// Right Alt (AltGr on many layouts).
+    AltRight,
+    /// Left Super / Windows / Command key.
+    SuperLeft,
+    /// Right Super / Windows / Command key.
+    SuperRight,
+    /// Caps Lock.
     CapsLock,
-    Minus, Equal, BracketLeft, BracketRight, Backslash, Semicolon, Quote, Backquote,
-    Comma, Period, Slash,
-    Numpad0, Numpad1, Numpad2, Numpad3, Numpad4, Numpad5, Numpad6, Numpad7, Numpad8, Numpad9,
-    NumpadAdd, NumpadSubtract, NumpadMultiply, NumpadDivide, NumpadEnter, NumpadDecimal,
-    /// Key with no mapping; see [`PhysicalKey::Unidentified`] for the native code.
+    /// The `-` key on the main row.
+    Minus,
+    /// The `=` key on the main row.
+    Equal,
+    /// The `[` key.
+    BracketLeft,
+    /// The `]` key.
+    BracketRight,
+    /// The backslash key.
+    Backslash,
+    /// The `;` key.
+    Semicolon,
+    /// The apostrophe key.
+    Quote,
+    /// The grave accent / backtick key.
+    Backquote,
+    /// The `,` key.
+    Comma,
+    /// The `.` key.
+    Period,
+    /// The `/` key.
+    Slash,
+    /// Numpad `0`.
+    Numpad0,
+    /// Numpad `1`.
+    Numpad1,
+    /// Numpad `2`.
+    Numpad2,
+    /// Numpad `3`.
+    Numpad3,
+    /// Numpad `4`.
+    Numpad4,
+    /// Numpad `5`.
+    Numpad5,
+    /// Numpad `6`.
+    Numpad6,
+    /// Numpad `7`.
+    Numpad7,
+    /// Numpad `8`.
+    Numpad8,
+    /// Numpad `9`.
+    Numpad9,
+    /// Numpad `+`.
+    NumpadAdd,
+    /// Numpad `-`.
+    NumpadSubtract,
+    /// Numpad `*`.
+    NumpadMultiply,
+    /// Numpad `/`.
+    NumpadDivide,
+    /// Numpad Enter.
+    NumpadEnter,
+    /// Numpad decimal separator.
+    NumpadDecimal,
+    /// A key with no known code (the raw scancode is in `PhysicalKey::Unidentified`).
     Unidentified,
 }
 

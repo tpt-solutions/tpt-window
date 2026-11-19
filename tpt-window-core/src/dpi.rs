@@ -6,9 +6,9 @@ macro_rules! pair {
         /// A pair of values; see the module docs.
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
         pub struct $name<P> {
-            #[allow(missing_docs)]
+            #[doc = concat!("The `", stringify!($a), "` component.")]
             pub $a: P,
-            #[allow(missing_docs)]
+            #[doc = concat!("The `", stringify!($b), "` component.")]
             pub $b: P,
         }
         impl<P> $name<P> {
