@@ -73,7 +73,7 @@ Tracks the phased rollout from [spec.txt](spec.txt). License: MIT OR Apache-2.0,
 - [~] Replace winit in tpt-nova: **Windows done**, merged to tpt-nova local `master` (`b124d72`, not pushed; path deps to `../tpt-window`, switch to a published/git dep before pushing). Editor smoke-run opens a window and reaches its loop; not visually checked. WASM not done (nova has no WASM build yet). Known behaviour changes: shortcuts follow physical QWERTY positions; text comes from IME commits.
 - [x] AI-agent yield point: the caller loop gets a `YieldPoint` once per step (`tpt-window-core`). Nova's loop ignores it for rendering; the display-sync test is still open.
 - [ ] Test that display refresh stays in sync with the AI-agent yield point
-- [x] tpt-visual: wgpu surface from raw handles; `Resized` reconfigures; frames render from the loop (not `RedrawRequested`). Done in `simple_player`, merged to tpt-visual local `master` (`27338e8`, not pushed). Runs for 12 s with no errors. Uses RGBA surface: the compositor's BGRA path is broken (tpt-visual todo.md).
+- [x] tpt-visual: wgpu surface from raw handles; `Resized` reconfigures; frames render from the loop (not `RedrawRequested`). Done in `simple_player`, merged to tpt-visual local `master` (`b0af009`, not pushed). Runs for 12 s on a BGRA surface with no errors. The compositor's BGRA bug and the MSRV bump to 1.87 are fixed in that commit.
 - [ ] **Exit:** tpt-nova demo runs on tpt-window
 
 ## Phase 3: Hard Platforms (Weeks 5–8)
