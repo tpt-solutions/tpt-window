@@ -18,3 +18,9 @@ version = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSDate", "NSThread", "NSRunLoop"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSEvent", "NSView", "NSScreen", "NSResponder", "NSGraphics", "NSRunningApplication", "NSColor", "NSWindowController", "NSGraphicsContext", "NSText", "NSMenu"] }
+
+# AppKit must be driven from the process main thread, which libtest does not
+# provide, so this target uses its own `main` (tests/real_window.rs).
+[[test]]
+name = "real_window"
+harness = false

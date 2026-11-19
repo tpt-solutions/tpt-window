@@ -12,9 +12,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Linux system libraries (xkbcommon for the Wayland backend)
+      - name: Linux system libraries (xkbcommon for Wayland, libudev for gilrs)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libudev-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

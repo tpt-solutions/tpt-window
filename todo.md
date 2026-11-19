@@ -15,7 +15,7 @@ Tracks the phased rollout from [spec.txt](spec.txt). License: MIT OR Apache-2.0,
 - [x] **Decided: archon capabilities.** Map window scopes onto archon's `Resource::Channel` / `Resource::Device` capabilities inside `tpt-window-archon`; do event signing there as an envelope (core stays crypto-free). Extend archon only if the mapping cannot express per-window scope.
 - [x] Commit work to master (push is manual).
 - [x] **Decided: IME surface.** Use the existing `ImeEvent::Preedit` (composition) and `ImeEvent::Commit` (committed text). Win32 first: composition is reported as Preedit from WM_IME_COMPOSITION; committed text arrives as WM_CHAR, the existing path. Cocoa, Wayland (text-input v3) and X11 (XIM) follow, each needing its own platform test.
-- [x] **Decided: gamepads are not in the windowing layer.** Put them in a separate optional crate (for example `tpt-window-gamepad` over `gilrs`), so core and the native backends keep their dependency footprint. Not started.
+- [x] **Decided: gamepads are not in the windowing layer.** Separate optional crate `tpt-window-gamepad` over `gilrs` 0.11. Own button, axis and event types; `poll` fills a caller-owned Vec and never blocks. Compile- and clippy-checked for Windows, Linux (needs libudev-dev, added to CI) and macOS; unit tests pass on Windows. Not tested with a real controller (none here).
 - [x] **Decided: transparency belongs to the renderer.** The window layer cannot make a window see-through by itself (measured: DWM alone gives white). It needs a DXGI composition swapchain with composite alpha in the GPU code. Deferred to the renderer work.
 
 ## Phase 0: Repo & Governance

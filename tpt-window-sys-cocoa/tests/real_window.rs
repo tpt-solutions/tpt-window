@@ -1,18 +1,26 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Drives a real (hidden) AppKit window. Runs only on macOS, so it executes in CI
 //! on the macOS runner.
-#![cfg(target_os = "macos")]
+//!
+//! `harness = false` (see Cargo.toml): libtest runs each test on a spawned thread,
+//! but AppKit's event loop must be created on the process's main thread. This
+//! custom `main` runs the lifecycle check on the main thread. Off macOS it is a
+//! no-op so the workspace still builds and tests on other platforms.
 
+#[cfg(target_os = "macos")]
 use raw_window_handle::RawWindowHandle;
+#[cfg(target_os = "macos")]
 use tpt_window_core::*;
+#[cfg(target_os = "macos")]
 use tpt_window_sys_cocoa::new_event_loop;
 
+#[cfg(target_os = "macos")]
 fn pump(el: &mut EventLoop, q: &mut EventQueue) -> Vec<WindowEvent> {
     el.poll_events(&mut EventSink::new(q));
     q.drain().map(|e| e.event).collect()
 }
 
-#[test]
+#[cfg(target_os = "macos")]
 fn window_lifecycle() {
     let mut el = new_event_loop().expect("event loop on the main thread");
     let mut q = EventQueue::with_capacity(1024);
@@ -49,4 +57,12 @@ fn window_lifecycle() {
         el.poll_events(&mut EventSink::new(&mut q)),
         PollStatus::Exit
     );
+}
+
+fn main() {
+    #[cfg(target_os = "macos")]
+    {
+        window_lifecycle();
+        println!("test window_lifecycle ... ok");
+    }
 }
