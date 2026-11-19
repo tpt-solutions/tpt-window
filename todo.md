@@ -70,10 +70,10 @@ Tracks the phased rollout from [spec.txt](spec.txt). License: MIT OR Apache-2.0,
 - [x] Found the repos. Findings so far: tpt-nova-app and tpt-nova-input depend on `winit = "0.30"`; tpt-appfront-canvas has its own internal Win32/X11/macOS window layer (windows-sys, objc2) that tpt-window could replace; tpt-visual uses wgpu behind the `tpt-av-visual` facade
 - [ ] Read tpt-nova-app's winit usage in detail and tpt-visual's surface-creation API
 - [x] `WindowResource` and `InputEventQueue` (feature `ecs` in core; compile-checked only, no dedicated test yet)
-- [~] Replace winit in tpt-nova: **Windows done**, on branch `tpt-window-migration` in tpt-nova (commit `9e229ab`, not pushed; path deps to `../tpt-window`, switch to a published/git dep before merging). Editor smoke-run opens a window and reaches its loop; not visually checked. WASM not done (nova has no WASM build yet). Known behaviour changes: shortcuts follow physical QWERTY positions; text comes from IME commits.
+- [~] Replace winit in tpt-nova: **Windows done**, merged to tpt-nova local `master` (`b124d72`, not pushed; path deps to `../tpt-window`, switch to a published/git dep before pushing). Editor smoke-run opens a window and reaches its loop; not visually checked. WASM not done (nova has no WASM build yet). Known behaviour changes: shortcuts follow physical QWERTY positions; text comes from IME commits.
 - [x] AI-agent yield point: the caller loop gets a `YieldPoint` once per step (`tpt-window-core`). Nova's loop ignores it for rendering; the display-sync test is still open.
 - [ ] Test that display refresh stays in sync with the AI-agent yield point
-- [ ] tpt-visual: wgpu surface from raw handles; Resized reconfigures, RedrawRequested renders
+- [x] tpt-visual: wgpu surface from raw handles; `Resized` reconfigures; frames render from the loop (not `RedrawRequested`). Done in `simple_player`, merged to tpt-visual local `master` (`27338e8`, not pushed). Runs for 12 s with no errors. Uses RGBA surface: the compositor's BGRA path is broken (tpt-visual todo.md).
 - [ ] **Exit:** tpt-nova demo runs on tpt-window
 
 ## Phase 3: Hard Platforms (Weeks 5–8)
