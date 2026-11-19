@@ -11,13 +11,9 @@ readme = "README.md"
 keywords = ["macos", "appkit", "cocoa", "windowing", "objc2"]
 categories = ["os::macos-apis", "gui"]
 
-[dependencies]
-tpt-window-core = { workspace = true }
-
-[dependencies.raw-window-handle]
-version = "0.6"
-
 [target.'cfg(target_os = "macos")'.dependencies]
+tpt-window-core = { workspace = true }
+raw-window-handle = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSDate", "NSThread", "NSRunLoop"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSEvent", "NSView", "NSScreen", "NSResponder", "NSGraphics", "NSRunningApplication", "NSColor", "NSWindowController", "NSGraphicsContext", "NSText", "NSMenu"] }
