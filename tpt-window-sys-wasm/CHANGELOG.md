@@ -13,10 +13,14 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - DOM listeners for keyboard, mouse, wheel, touch, focus and `ResizeObserver`,
   feeding a pre-allocated ring that `poll` drains.
 - `requestAnimationFrame`-driven redraw.
+- Browser check harness in `browser-check/`: runs the backend in Chromium through
+  Playwright and checks pointer, wheel, keyboard, committed text and canvas resize.
+  It is not part of the workspace and is not run in CI.
 
 ### Notes
 - `wait` behaves like `poll`, because a browser cannot block. Callers drive the
   loop from `requestAnimationFrame`.
-- Rendering verified in Edge with WebGPU through tpt-nova. Input and resize are not
-  yet verified in a browser.
+- Rendering verified in Edge with WebGPU through tpt-nova. Input and resize are
+  checked in Chromium by the browser check harness. Firefox and Safari are not
+  checked.
 - No IME composition.

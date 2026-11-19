@@ -36,7 +36,9 @@ blocking `loop`. The core crate uses `web-time` on this target, because
 
 - **Rendering verified** in Microsoft Edge with WebGPU, using tpt-nova (headless
   Edge via Playwright, on an RTX 3050). A screenshot was checked.
-- **Input and resize** have not yet been checked in a browser.
+- **Input and resize** are checked in Chromium by the browser check harness:
+  pointer, wheel, keyboard, committed text and canvas resize. Firefox and Safari are
+  not checked.
 - **No IME composition.** Only committed text is delivered.
 - Compile- and clippy-checked for `wasm32-unknown-unknown` in CI.
 
@@ -46,8 +48,9 @@ blocking `loop`. The core crate uses `web-time` on this target, because
 cargo check -p tpt-window-sys-wasm --target wasm32-unknown-unknown
 ```
 
-There are no in-browser tests in this repository yet. Browser verification has so
-far been done through tpt-nova.
+The browser check in [`browser-check/`](browser-check/README.md) runs the backend in
+Chromium through Playwright. It is a separate crate outside the workspace, and it is
+not run in CI because it needs a browser.
 
 ## Documentation
 
