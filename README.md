@@ -9,7 +9,8 @@ Engine-first windowing, input and surface management for the TPT AV Stack
 - Explicit AI-agent yield points per frame.
 - Permissive-only dependency tree, enforced by `cargo-deny`.
 
-**Status:** pre-0.1 scaffold. See [spec.txt](spec.txt) and [todo.md](todo.md).
+**Status:** pre-release (0.1.0), not yet on crates.io. Per-platform verification is
+tracked in [todo.md](todo.md). See also [spec.txt](spec.txt).
 
 Coming from winit 0.30? See [MIGRATION.md](MIGRATION.md) for the event and window mapping,
 and the gaps.
