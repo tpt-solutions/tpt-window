@@ -41,6 +41,16 @@ jobs:
           echo "WAYLAND_DISPLAY=wayland-test" >> "$GITHUB_ENV"
       - run: cargo test -p tpt-window-sys-wayland -- --nocapture
 
+  # The X11 lifecycle test needs an X server, so run it under Xvfb.
+  x11:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - uses: dtolnay/rust-toolchain@stable
+      - run: xvfb-run -a cargo test -p tpt-window-sys-x11 -- --nocapture
+
   wasm:
     runs-on: ubuntu-latest
     steps:

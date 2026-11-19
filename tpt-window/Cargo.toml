@@ -19,6 +19,7 @@ tpt-window-sys-cocoa = { path = "../tpt-window-sys-cocoa", version = "0.1.0" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tpt-window-sys-wayland = { path = "../tpt-window-sys-wayland", version = "0.1.0" }
+tpt-window-sys-x11 = { path = "../tpt-window-sys-x11", version = "0.1.0" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tpt-window-sys-wasm = { path = "../tpt-window-sys-wasm", version = "0.1.0" }

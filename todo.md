@@ -78,7 +78,7 @@ Tracks the phased rollout from [spec.txt](spec.txt). License: MIT OR Apache-2.0,
 
 ## Phase 3: Hard Platforms (Weeks 5–8)
 - [~] `tpt-window-sys-cocoa`: written (AppKit via objc2: window, commands, NSEvent input, state diffs). Compile- and clippy-checked for macOS; the test in `tests/real_window.rs` runs on the macOS CI runner, not yet seen passing. Gaps: no window delegate (close cannot be vetoed), no cursor enter/leave tracking area.
-- [ ] `tpt-window-sys-x11` (x11rb)
+- [~] `tpt-window-sys-x11`: written on Xlib loaded at runtime (`x11-dl`), not x11rb: wgpu's Xlib surface needs the `Display*`, which x11rb does not expose. Window, WM_DELETE_WINDOW close, input (keys with text, mouse, wheel), configure-driven resize and move. Compile- and clippy-checked for Linux; the lifecycle test runs in a CI job under Xvfb, not yet seen passing. Gaps: scale factor fixed at 1.0 (no Xft DPI), no key repeat, no IME.
 - [~] `tpt-window-sys-wayland`: written (sctk 0.19: xdg toplevel, seat keyboard/pointer, configure, close request). Compile- and clippy-checked for Linux; the lifecycle test runs in a CI job with headless weston, not yet seen passing. Gaps: SetSize/SetPosition/SetVisible cannot be expressed in Wayland, no key repeat, no IME composition. Not yet tested with a real compositor.
 - [ ] IME implementation (all platforms)
 - [ ] DPI / Retina / fractional scaling across all platforms

@@ -778,6 +778,7 @@ dependencies = [
  "tpt-window-sys-wasm",
  "tpt-window-sys-wayland",
  "tpt-window-sys-win32",
+ "tpt-window-sys-x11",
 ]
 
 [[package]]
@@ -841,7 +842,10 @@ dependencies = [
 name = "tpt-window-sys-x11"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "raw-window-handle",
  "tpt-window-core",
+ "x11-dl",
 ]
 
 [[package]]
@@ -1134,6 +1138,17 @@ name = "wit-bindgen"
 version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
+
+[[package]]
+name = "x11-dl"
+version = "2.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38735924fedd5314a6e548792904ed8c6de6636285cb9fec04d5b1db85c1516f"
+dependencies = [
+ "libc",
+ "once_cell",
+ "pkg-config",
+]
 
 [[package]]
 name = "xcursor"

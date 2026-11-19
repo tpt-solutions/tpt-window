@@ -28,8 +28,7 @@ pub use tpt_window_core::*;
 /// The spec writes this as `EventLoop::new()`; an inherent constructor cannot live in
 /// the facade because `EventLoop` is defined in `tpt-window-core`.
 ///
-/// Platforms without a backend yet (Linux without Wayland, X11 not written yet; see
-/// todo.md Phase 3) return
+/// Platforms without a backend yet return
 /// [`WindowError::Unsupported`].
 pub fn new_event_loop() -> Result<EventLoop, WindowError> {
     #[cfg(windows)]
@@ -42,7 +41,13 @@ pub fn new_event_loop() -> Result<EventLoop, WindowError> {
     }
     #[cfg(target_os = "linux")]
     {
-        tpt_window_sys_wayland::new_event_loop()
+        // Prefer Wayland when it is running; otherwise, or if it fails, use X11.
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            if let Ok(el) = tpt_window_sys_wayland::new_event_loop() {
+                return Ok(el);
+            }
+        }
+        tpt_window_sys_x11::new_event_loop()
     }
     #[cfg(target_arch = "wasm32")]
     {
