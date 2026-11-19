@@ -14,6 +14,9 @@ Tracks the phased rollout from [spec.txt](spec.txt). License: MIT OR Apache-2.0,
 - [x] **Decided: display-server role.** A new, separate crate fills it (decide its exact home at Phase 4; tpt-kernel / tpt-k-kernel not yet read closely). tpt-shell is a *client* of the versioned display protocol, not the compositor. Nothing before Phase 4 depends on it.
 - [x] **Decided: archon capabilities.** Map window scopes onto archon's `Resource::Channel` / `Resource::Device` capabilities inside `tpt-window-archon`; do event signing there as an envelope (core stays crypto-free). Extend archon only if the mapping cannot express per-window scope.
 - [x] Commit work to master (push is manual).
+- [x] **Decided: IME surface.** Use the existing `ImeEvent::Preedit` (composition) and `ImeEvent::Commit` (committed text). Win32 first: composition is reported as Preedit from WM_IME_COMPOSITION; committed text arrives as WM_CHAR, the existing path. Cocoa, Wayland (text-input v3) and X11 (XIM) follow, each needing its own platform test.
+- [x] **Decided: gamepads are not in the windowing layer.** Put them in a separate optional crate (for example `tpt-window-gamepad` over `gilrs`), so core and the native backends keep their dependency footprint. Not started.
+- [x] **Decided: transparency belongs to the renderer.** The window layer cannot make a window see-through by itself (measured: DWM alone gives white). It needs a DXGI composition swapchain with composite alpha in the GPU code. Deferred to the renderer work.
 
 ## Phase 0: Repo & Governance
 - [x] git init, .gitignore
@@ -80,7 +83,7 @@ Tracks the phased rollout from [spec.txt](spec.txt). License: MIT OR Apache-2.0,
 - [~] `tpt-window-sys-cocoa`: written (AppKit via objc2: window, commands, NSEvent input, state diffs). Compile- and clippy-checked for macOS; the test in `tests/real_window.rs` runs on the macOS CI runner, not yet seen passing. Gaps: no window delegate (close cannot be vetoed), no cursor enter/leave tracking area.
 - [~] `tpt-window-sys-x11`: written on Xlib loaded at runtime (`x11-dl`), not x11rb: wgpu's Xlib surface needs the `Display*`, which x11rb does not expose. Window, WM_DELETE_WINDOW close, input (keys with text, mouse, wheel), configure-driven resize and move. Compile- and clippy-checked for Linux; the lifecycle test runs in a CI job under Xvfb, not yet seen passing. Gaps: scale factor fixed at 1.0 (no Xft DPI), no key repeat, no IME.
 - [~] `tpt-window-sys-wayland`: written (sctk 0.19: xdg toplevel, seat keyboard/pointer, configure, close request). Compile- and clippy-checked for Linux; the lifecycle test runs in a CI job with headless weston, not yet seen passing. Gaps: SetSize/SetPosition/SetVisible cannot be expressed in Wayland, no key repeat, no IME composition. Not yet tested with a real compositor.
-- [ ] IME implementation (all platforms)
+- [~] IME implementation: **Win32 written** (Preedit from WM_IME_COMPOSITION; Commit via the WM_CHAR path). Compile- and clippy-checked only: no input method is installed on the development machine (English layouts only), and the CI runners have none. Verify with a Japanese or Chinese IME. Not started: Cocoa, Wayland, X11, and candidate-window placement (ImmSetCandidateWindow).
 - [ ] DPI / Retina / fractional scaling across all platforms
 - [x] Verify wayland-client/sctk licences pass cargo-deny (checked locally; CI runs cargo-deny too)
 - [ ] **Exit:** same example runs on all platforms

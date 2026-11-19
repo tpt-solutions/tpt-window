@@ -38,6 +38,9 @@ use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem,
     GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
+use windows_sys::Win32::UI::Input::Ime::{
+    GCS_COMPSTR, ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
@@ -55,6 +58,45 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 /// Touch contact update; the handle is in `lparam`.
 const WM_TOUCH: u32 = 0x0240;
+
+/// Current IME composition string, or empty when there is none.
+fn composition_text(hwnd: HWND) -> String {
+    // SAFETY: the context is released before returning.
+    let himc = unsafe { ImmGetContext(hwnd) };
+    if himc.is_null() {
+        return String::new();
+    }
+    let bytes = unsafe { ImmGetCompositionStringW(himc, GCS_COMPSTR, core::ptr::null_mut(), 0) };
+    let mut text = String::new();
+    if bytes > 0 {
+        let mut units = vec![0_u16; bytes as usize / 2];
+        unsafe {
+            ImmGetCompositionStringW(himc, GCS_COMPSTR, units.as_mut_ptr().cast(), bytes as u32)
+        };
+        text = String::from_utf16_lossy(&units);
+    }
+    unsafe { ImmReleaseContext(hwnd, himc) };
+    text
+}
+
+fn push_preedit(window: WindowId, text: &str) {
+    let mut rest = text;
+    loop {
+        let (chunk, next) = ImeText::take_chunk(rest);
+        let continued = !next.is_empty();
+        push_event(
+            window,
+            WindowEvent::Ime(ImeEvent::Preedit {
+                text: chunk,
+                continued,
+            }),
+        );
+        if !continued {
+            break;
+        }
+        rest = next;
+    }
+}
 const WM_TPT_COMMAND: u32 = WM_APP + 1;
 const WM_TPT_DESTROY: u32 = WM_APP + 2;
 const CLASS_NAME: [u16; 17] = utf16z(b"tpt_window_class");
@@ -526,6 +568,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     }
                 }
             }
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
+        WM_IME_COMPOSITION => {
+            // Composition text is reported as Preedit. Committed text is left to
+            // DefWindowProc, which sends it as WM_CHAR and reaches the Commit path.
+            if lparam as u32 & GCS_COMPSTR != 0 {
+                push_preedit(id, &composition_text(hwnd));
+            }
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
+        WM_IME_ENDCOMPOSITION => {
+            push_preedit(id, "");
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         }
         WM_TOUCH => {
