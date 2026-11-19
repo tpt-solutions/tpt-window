@@ -7,7 +7,8 @@
 //! Design notes:
 //! - All Xlib calls happen on the thread that created the [`EventLoop`]. Handles
 //!   on other threads only queue commands, applied on the next poll.
-//! - Scale factor is 1.0. Xft DPI scaling is not read yet.
+//! - Scale factor comes from the `Xft.dpi` resource (96 dpi = 1.0). It is read once
+//!   when the loop opens, so a later change is not picked up.
 //! - Auto-repeat arrives as release/press pairs unless detectable auto-repeat is
 //!   enabled. Key repeat is not generated.
 //! - Window closing is requested through `WM_DELETE_WINDOW`, so the application can
@@ -72,6 +73,7 @@ pub struct X11EventLoop {
     xlib: Xlib,
     display: *mut Display,
     screen: c_int,
+    scale: f64,
     wm_delete: c_ulong,
     records: RefCell<Vec<Record>>,
     pending: RefCell<VecDeque<Event>>,
@@ -100,15 +102,35 @@ pub fn new_event_loop() -> Result<EventLoop, WindowError> {
         (screen, atom)
     };
     // Force the thread-local ring to allocate now, not on the hot path.
+    // SAFETY: the display is open.
+    let scale = unsafe { dpi_scale(&xlib, display) };
     Ok(EventLoop::with_backend(Box::new(X11EventLoop {
         xlib,
         display,
         screen,
+        scale,
         wm_delete,
         records: RefCell::new(Vec::new()),
         pending: RefCell::new(VecDeque::with_capacity(4096)),
         exit: Arc::new(AtomicBool::new(false)),
     })))
+}
+
+/// Scale factor from the `Xft.dpi` resource, where 96 dpi is 1.0. Falls back to 1.0.
+///
+/// # Safety
+/// `display` must be an open Xlib display.
+unsafe fn dpi_scale(xlib: &Xlib, display: *mut Display) -> f64 {
+    // SAFETY: the resource string is owned by Xlib and is read immediately.
+    let value = unsafe { (xlib.XGetDefault)(display, c"Xft".as_ptr(), c"dpi".as_ptr()) };
+    if value.is_null() {
+        return 1.0;
+    }
+    // SAFETY: XGetDefault returns a NUL-terminated string.
+    let text = unsafe { std::ffi::CStr::from_ptr(value) }.to_string_lossy();
+    text.trim()
+        .parse::<f64>()
+        .map_or(1.0, |dpi| (dpi / 96.0).clamp(0.25, 8.0))
 }
 
 fn push_text(pending: &mut VecDeque<Event>, id: WindowId, text: &str) {
@@ -476,10 +498,14 @@ impl EventLoopBackend for X11EventLoop {
         attrs: &WindowAttributes,
     ) -> Result<Arc<dyn WindowBackend>, WindowError> {
         let inner = attrs.inner_size.unwrap_or(LogicalSize::new(800.0, 600.0));
-        let size = PhysicalSize::new(inner.width.max(1.0) as u32, inner.height.max(1.0) as u32);
+        let scale = self.scale;
+        let size = PhysicalSize::new(
+            (inner.width * scale).max(1.0) as u32,
+            (inner.height * scale).max(1.0) as u32,
+        );
         let (x, y) = attrs
             .position
-            .map_or((0, 0), |p| (p.x as c_int, p.y as c_int));
+            .map_or((0, 0), |p| ((p.x * scale) as c_int, (p.y * scale) as c_int));
         let root = unsafe { (self.xlib.XRootWindow)(self.display, self.screen) };
         // SAFETY: the display is open; the window is configured below before use.
         let window = unsafe {
@@ -515,13 +541,13 @@ impl EventLoopBackend for X11EventLoop {
         let fixed = !attrs.resizable || !attrs.decorations;
         if let Some(min) = attrs.min_size {
             hints.flags |= xlib::PMinSize;
-            hints.min_width = min.width as c_int;
-            hints.min_height = min.height as c_int;
+            hints.min_width = (min.width * scale) as c_int;
+            hints.min_height = (min.height * scale) as c_int;
         }
         if let Some(max) = attrs.max_size {
             hints.flags |= xlib::PMaxSize;
-            hints.max_width = max.width as c_int;
-            hints.max_height = max.height as c_int;
+            hints.max_width = (max.width * scale) as c_int;
+            hints.max_height = (max.height * scale) as c_int;
         }
         if fixed {
             hints.flags |= xlib::PMinSize | xlib::PMaxSize;
@@ -548,7 +574,7 @@ impl EventLoopBackend for X11EventLoop {
             state: SharedWindowState::new(WindowState {
                 size,
                 position: PhysicalPosition::new(x, y),
-                scale_factor: 1.0,
+                scale_factor: scale,
                 focused: false,
                 visible: attrs.visible,
             }),

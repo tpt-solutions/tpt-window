@@ -91,6 +91,10 @@ struct Record {
     scale: i32,
     /// Last physical size reported to the application.
     size: PhysicalSize<u32>,
+    /// Whether the compositor's first configure has been seen. That configure is
+    /// always reported as `Resized`, even when it matches the requested size (a
+    /// 0x0 configure means "client chooses", so nothing would otherwise be sent).
+    configured: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -502,7 +506,9 @@ impl WindowHandler for WaylandState {
             h.map_or(cur_h / self.windows[i].scale as u32, NonZeroU32::get),
         );
         let physical = WaylandState::physical(self.windows[i].scale, logical);
-        if physical != self.windows[i].size {
+        let first = !self.windows[i].configured;
+        self.windows[i].configured = true;
+        if first || physical != self.windows[i].size {
             let id = self.windows[i].data.id;
             self.windows[i].size = physical;
             self.windows[i].data.state.update(|s| s.size = physical);
@@ -708,6 +714,7 @@ impl EventLoopBackend for WaylandEventLoop {
             data: data.clone(),
             scale: 1,
             size,
+            configured: false,
         });
         Ok(Arc::new(WaylandWindow { data }))
     }

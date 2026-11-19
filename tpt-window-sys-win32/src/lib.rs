@@ -31,7 +31,7 @@ use raw_window_handle::{
 };
 use tpt_window_core::*;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{InvalidateRect, ValidateRect};
+use windows_sys::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient, ValidateRect};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::INFINITE;
 use windows_sys::Win32::UI::HiDpi::{
@@ -41,10 +41,16 @@ use windows_sys::Win32::UI::HiDpi::{
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
+use windows_sys::Win32::UI::Input::Touch::{
+    CloseTouchInputHandle, GetTouchInputInfo, RegisterTouchWindow, TOUCHEVENTF_DOWN,
+    TOUCHEVENTF_UP, TOUCHINPUT,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 /// Not in the enabled windows-sys feature set; value from winuser.h.
 const WM_MOUSELEAVE: u32 = 0x02A3;
+/// Touch contact update; the handle is in `lparam`.
+const WM_TOUCH: u32 = 0x0240;
 const WM_TPT_COMMAND: u32 = WM_APP + 1;
 const WM_TPT_DESTROY: u32 = WM_APP + 2;
 const CLASS_NAME: [u16; 17] = utf16z(b"tpt_window_class");
@@ -472,6 +478,46 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             );
             return 0;
         }
+        WM_TOUCH => {
+            let count = wparam;
+            let mut inputs: Vec<TOUCHINPUT> = vec![unsafe { core::mem::zeroed() }; count];
+            let ok = unsafe {
+                GetTouchInputInfo(
+                    lparam as _,
+                    count as u32,
+                    inputs.as_mut_ptr(),
+                    size_of::<TOUCHINPUT>() as i32,
+                )
+            };
+            if ok != 0 {
+                for input in &inputs {
+                    // Touch coordinates are screen points in hundredths of a pixel.
+                    let mut pt = POINT {
+                        x: input.x / 100,
+                        y: input.y / 100,
+                    };
+                    unsafe { ScreenToClient(hwnd, &mut pt) };
+                    let phase = if input.dwFlags & TOUCHEVENTF_DOWN != 0 {
+                        TouchPhase::Started
+                    } else if input.dwFlags & TOUCHEVENTF_UP != 0 {
+                        TouchPhase::Ended
+                    } else {
+                        TouchPhase::Moved
+                    };
+                    push_event(
+                        id,
+                        WindowEvent::Touch(TouchEvent {
+                            id: u64::from(input.dwID),
+                            phase,
+                            position: PhysicalPosition::new(f64::from(pt.x), f64::from(pt.y)),
+                            force: 0.0,
+                        }),
+                    );
+                }
+            }
+            unsafe { CloseTouchInputHandle(lparam as _) };
+            return 0;
+        }
         WM_MOUSELEAVE => {
             d.cursor_inside.store(false, Ordering::Relaxed);
             push_event(id, WindowEvent::CursorLeft);
@@ -797,6 +843,10 @@ impl EventLoopBackend for Win32EventLoop {
                 raw as *const core::ffi::c_void,
             )
         };
+        if !hwnd.is_null() {
+            // Ask for WM_TOUCH from this window's touch input.
+            unsafe { RegisterTouchWindow(hwnd, 0) };
+        }
         if hwnd.is_null() {
             // SAFETY: WM_NCCREATE may not have run, so reclaim the reference we leaked.
             // If it did run, WM_NCDESTROY already released it (hwnd would be non-null then).
