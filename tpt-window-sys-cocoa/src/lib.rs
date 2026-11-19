@@ -2,22 +2,23 @@
 //! macOS backend for tpt-window, built on AppKit through `objc2`.
 //!
 //! Design notes:
-//! - Everything AppKit runs on the thread that created the [`EventLoop`]
+//! - Everything AppKit runs on the thread that created the `EventLoop`
 //!   (`MainThreadMarker`). Other threads only queue commands, which are applied
 //!   on the next poll.
 //! - Input is read by pumping `NSEvent`s and translating them, then forwarding each
 //!   event to `NSApplication::sendEvent` so AppKit keeps its normal behaviour. This
 //!   avoids declaring a custom `NSView` subclass.
-//! - There is no window delegate yet, so a close button click closes the window
-//!   without asking first. The backend reports that as `CloseRequested` followed by
-//!   `Destroyed`. A veto needs a delegate (see todo.md).
-//! - Cursor enter/leave events need a tracking area, which is not set up yet.
+//! - A window delegate vetoes the close button. The backend reports `CloseRequested`
+//!   and keeps the window open, so the application decides by dropping its window.
+//!   This matches Win32 and Wayland. Compile-checked for macOS only; not yet run on a Mac.
+//! - Cursor enter/leave come from a tracking area on the content view, covering the
+//!   whole view (`InVisibleRect`), and are translated from `MouseEntered`/`MouseExited`.
 //!
 //! Only the macOS build is compiled; on other platforms this crate is empty.
 #![cfg(target_os = "macos")]
 #![warn(missing_docs)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -26,12 +27,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use objc2::rc::Retained;
-use objc2::{MainThreadMarker, MainThreadOnly};
+use objc2::runtime::ProtocolObject;
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
-    NSEventModifierFlags, NSEventType, NSScreen, NSWindow, NSWindowStyleMask,
+    NSEventModifierFlags, NSEventType, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSWindow,
+    NSWindowDelegate, NSWindowStyleMask,
 };
-use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSDate, NSDefaultRunLoopMode, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+};
 use raw_window_handle::{
     AppKitDisplayHandle, AppKitWindowHandle, RawDisplayHandle, RawWindowHandle,
 };
@@ -60,7 +65,36 @@ fn push_event(window: WindowId, event: WindowEvent) {
 
 struct Record {
     ns_window: Retained<NSWindow>,
+    /// The window holds its delegate weakly, so the record must keep it alive.
+    _delegate: Retained<WindowDelegate>,
     data: Arc<WindowData>,
+}
+
+define_class!(
+    // Turns the close button into `CloseRequested` and keeps the window open. The
+    // application closes it by dropping its window, which the poll loop then does.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "TptWindowDelegate"]
+    #[ivars = Cell<u64>]
+    struct WindowDelegate;
+
+    unsafe impl NSObjectProtocol for WindowDelegate {}
+
+    unsafe impl NSWindowDelegate for WindowDelegate {
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, _sender: &NSWindow) -> bool {
+            push_event(WindowId(self.ivars().get()), WindowEvent::CloseRequested);
+            false
+        }
+    }
+);
+
+impl WindowDelegate {
+    fn new(mtm: MainThreadMarker, id: WindowId) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(Cell::new(id.0));
+        unsafe { msg_send![super(this), init] }
+    }
 }
 
 /// State shared between the main-thread record and the `Window` handle.
@@ -316,6 +350,8 @@ fn translate(record: &Record, event: &NSEvent, mtm: MainThreadMarker) {
                 },
             );
         }
+        NSEventType::MouseEntered => push_event(id, WindowEvent::CursorEntered),
+        NSEventType::MouseExited => push_event(id, WindowEvent::CursorLeft),
         NSEventType::MouseMoved
         | NSEventType::LeftMouseDragged
         | NSEventType::RightMouseDragged
@@ -451,8 +487,8 @@ fn sync_record(record: &Record, mtm: MainThreadMarker) {
         }
     }
 
-    // Closed by the user (no delegate to veto it): the window is no longer visible
-    // and the app is not hidden.
+    // Closed without the delegate's veto (the close button is vetoed, so this is a
+    // programmatic close): the window is no longer visible and the app is not hidden.
     let app_hidden = NSApplication::sharedApplication(mtm).isHidden();
     if data.state.snapshot().visible && !window.isVisible() && !app_hidden {
         push_event(data.id, WindowEvent::CloseRequested);
@@ -679,6 +715,23 @@ impl EventLoopBackend for MacEventLoop {
             .ok_or_else(|| WindowError::Os("window has no content view".into()))?;
         let view_ptr = Retained::as_ptr(&view) as usize;
         let id = WindowId(NEXT_ID.fetch_add(1, Ordering::Relaxed));
+
+        // Enter/exit: the tracking area covers the whole view and follows its size.
+        let tracking = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                view.bounds(),
+                NSTrackingAreaOptions::MouseEnteredAndExited
+                    | NSTrackingAreaOptions::ActiveAlways
+                    | NSTrackingAreaOptions::InVisibleRect,
+                Some(&view),
+                None,
+            )
+        };
+        view.addTrackingArea(&tracking);
+
+        let delegate = WindowDelegate::new(mtm, id);
+        window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         let data = Arc::new(WindowData {
             id,
             state: SharedWindowState::new(WindowState {
@@ -703,6 +756,7 @@ impl EventLoopBackend for MacEventLoop {
         WINDOWS.with(|w| {
             w.borrow_mut().push(Record {
                 ns_window: window,
+                _delegate: delegate,
                 data: data.clone(),
             });
         });
