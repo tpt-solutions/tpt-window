@@ -381,7 +381,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     if msg == WM_NCCREATE {
         let cs = lparam as *const CREATESTRUCTW;
         let data = unsafe { (*cs).lpCreateParams } as *const WindowData;
-        unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, data as isize) };
+        unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, data as _) };
         return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
     }
     let Some(d) = (unsafe { data_of(hwnd) }) else {

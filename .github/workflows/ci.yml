@@ -51,6 +51,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: xvfb-run -a cargo test -p tpt-window-sys-x11 -- --nocapture
 
+  # 32-bit Windows: the window user data pointer is 32 bits wide here.
+  win32-x86:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+      - run: cargo test -p tpt-window-sys-win32 --target i686-pc-windows-msvc
+
   wasm:
     runs-on: ubuntu-latest
     steps:
