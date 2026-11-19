@@ -45,7 +45,7 @@ Tracks the phased rollout from [spec.txt](spec.txt). License: MIT OR Apache-2.0,
 - [x] `EventStatus` (`Accepted`, `BufferFull`, `Captured`)
 - [x] Drop counter + configurable policy (only counts events actually lost)
 - [x] Unit tests
-- [ ] Property / fuzz tests for `RingBuffer` and `InlineText`
+- [x] Property tests for `RingBuffer` and `InlineText` (proptest, `tests/properties.rs`). Fuzzing not done.
 ### Traits and API
 - [x] `EventLoopBackend`, `WindowBackend` traits
 - [x] `EventLoop`: `with_backend`, `poll_events`, `step`, `request_exit` (multi-window)
@@ -69,7 +69,7 @@ Tracks the phased rollout from [spec.txt](spec.txt). License: MIT OR Apache-2.0,
 ## Phase 2: Engine Integration (Weeks 3–4)
 - [x] Found the repos. Findings so far: tpt-nova-app and tpt-nova-input depend on `winit = "0.30"`; tpt-appfront-canvas has its own internal Win32/X11/macOS window layer (windows-sys, objc2) that tpt-window could replace; tpt-visual uses wgpu behind the `tpt-av-visual` facade
 - [ ] Read tpt-nova-app's winit usage in detail and tpt-visual's surface-creation API
-- [ ] `WindowResource` and `InputEventQueue` ECS types (feature-gated)
+- [x] `WindowResource` and `InputEventQueue` (feature `ecs` in core; compile-checked only, no dedicated test yet)
 - [ ] Replace winit in tpt-nova (Windows + WASM)
 - [ ] AI-agent yield point in main loop + test that display refresh stays in sync
 - [ ] tpt-visual: wgpu surface from raw handles; Resized reconfigures, RedrawRequested renders

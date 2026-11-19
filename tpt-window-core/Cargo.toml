@@ -10,3 +10,11 @@ rust-version.workspace = true
 
 [dependencies]
 raw-window-handle = "0.6"
+
+[features]
+default = []
+# Engine-facing resource types (WindowResource, InputEventQueue). No extra dependencies.
+ecs = []
+
+[dev-dependencies]
+proptest = "1"

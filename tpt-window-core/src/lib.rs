@@ -16,6 +16,8 @@
 
 pub mod backend;
 pub mod dpi;
+#[cfg(feature = "ecs")]
+pub mod ecs;
 pub mod error;
 pub mod event;
 pub mod event_loop;
@@ -44,3 +46,6 @@ pub use security::{CapabilityToken, DisplayScope, InputScope, SurfaceHandle, Win
 pub use sink::{EventQueue, EventSink, EventStatus};
 pub use text::{ImeEvent, ImeText, InlineText};
 pub use window::{Window, WindowBuilder};
+
+#[cfg(feature = "ecs")]
+pub use ecs::{InputEventQueue, WindowResource};
