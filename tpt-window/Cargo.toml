@@ -10,3 +10,9 @@ rust-version.workspace = true
 
 [dependencies]
 tpt-window-core = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+tpt-window-sys-win32 = { path = "../tpt-window-sys-win32", version = "0.1.0" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tpt-window-sys-wasm = { path = "../tpt-window-sys-wasm", version = "0.1.0" }

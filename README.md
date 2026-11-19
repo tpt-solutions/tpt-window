@@ -18,5 +18,6 @@ Licensed under either of
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
 
-at your option. Contributions are accepted under the same terms and must not
-introduce copyleft (GPL/LGPL/AGPL/MPL) dependencies.
+at your option.
+
+This project accepts issues only; see [CONTRIBUTING.md](CONTRIBUTING.md).

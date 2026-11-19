@@ -133,8 +133,9 @@ impl WindowBuilder {
 }
 
 4.4 The WindowEvent Enum
-Events are Copy where possible. Large payloads (like text input) use a small-string optimization or reference into a pre-allocated arena.
-#[derive(Clone, Debug)]
+Events are strictly Copy. Text payloads (IME) use fixed inline buffers (32 bytes) and are chunked when longer; see InlineText / ImeEvent in tpt-window-core.
+In a multi-window loop each event is wrapped as Event { window: WindowId, event: WindowEvent }.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WindowEvent {
     // Lifecycle
     CloseRequested,
@@ -199,8 +200,8 @@ pub enum EventStatus {
     Captured,
 }
 
-The RingBuffer is a fixed-capacity, heap-allocated-once, lock-free SPSC queue. It is allocated at EventLoop::new() and never resized. Capacity is configurable (default: 1024 events).
-Real-time safety guarantee: EventSink::push performs zero allocations. If the buffer is full, the backend drops the oldest event (configurable policy) or returns BufferFull. This is enforced by an allocation-counting test in CI (tpt-window-core/tests/rt_safety.rs).
+The RingBuffer is a fixed-capacity, heap-allocated-once FIFO owned by the caller (EventQueue = RingBuffer<Event>). It is never resized. Capacity is configurable (default: 1024 events). It is single-owner (&mut), not a cross-thread queue; backends write to it only from the polling thread.
+Real-time safety guarantee: EventSink::push performs zero allocations. If the buffer is full, push returns BufferFull and the backend keeps the event for the next poll (default DropNewest policy); the RingBuffer can alternatively be configured with DropOldest. Only events actually lost are counted in RingBuffer::dropped(). This is enforced by an allocation-counting test in CI (tpt-window-core/tests/rt_safety.rs).
 5. Integration Contracts
 5.1 tpt-window ↔ tpt-visual
 tpt-visual consumes the RawWindowHandle and RawDisplayHandle from tpt-window to create a wgpu::Surface. The contract is:
@@ -322,9 +323,23 @@ Cross-platform. Windows, macOS, Linux (X11 + Wayland), and Web all work.
 Performance. Matches or exceeds winit in event throughput and latency.
 Adoption. tpt-nova, tpt-appfront, and tpt-shell all use tpt-window as their windowing layer.
 10. Open Questions
-Wayland protocol version. Which version of xdg-shell should we target? (Recommendation: xdg-shell v5, the current stable.)
+Wayland protocol version. RESOLVED: target the stable xdg-shell protocol (xdg_wm_base) and bind the highest version the compositor offers, up to the version in the pinned wayland-protocols release. The earlier "v5" was an unstable revision, obsolete since wayland-protocols 1.12.
 Input method support. Should we support IME (Input Method Editor) in Phase 1, or defer to Phase 3? (Recommendation: defer, but design the API to support it.)
 Multi-window. Should tpt-window support multiple windows per EventLoop, or one window per EventLoop? (Recommendation: multiple windows per EventLoop, matching winit.)
 Clipboard. Should tpt-window provide clipboard access, or defer to a separate crate? (Recommendation: defer to tpt-archon.)
 11. License
 This specification is dual-licensed under MIT OR Apache-2.0. Contributions are accepted under the same terms and must not introduce copyleft (GPL/LGPL/AGPL/MPL) dependencies.
+
+12. Decision Log (supersedes earlier sections where they differ)
+2026-11-19
+- Ring buffer: caller-owned, single-owner, drop-newest by default (section 4.5).
+- WindowEvent is strictly Copy (section 4.4). Multi-window events carry a WindowId.
+- Multi-window per EventLoop. IME deferred to Phase 3 but the API exists. Clipboard deferred to tpt-archon.
+- EventLoop::new() is realised as tpt_window::new_event_loop(): the facade selects the backend, and core cannot name one. EventLoop::with_backend() is the core constructor.
+- EventLoop::poll_events/step take &mut self. Setters on Window queue a command applied on the next poll.
+- Window::raw_window_handle()/raw_display_handle() return Result (headless windows have none).
+- YieldPoint is emitted by EventLoop itself, once per poll/step, after backend events.
+- Win32 backend uses windows-sys (same project and licence as windows-rs).
+- DECIDED: a new separate crate fills the display-server role (home decided at Phase 4); tpt-shell is a client. Background: tpt-shell (github.com/tpt-solutions/tpt-shell) is a webview application shell, not a compositor, and it deliberately avoids winit-style windowing crates. Sections 1, 5.3 and 9 assume a compositor peer. Decide which project implements the display-server role (a new crate, tpt-kernel/tpt-k-kernel, or tpt-shell). protocol.rs is a version-only skeleton until then.
+- DECIDED: map window/input/display scopes onto Resource::Channel/Device in tpt-window-archon, with signing as an envelope there; extend archon only if needed. Background: tpt-archon's capability type (tpt-archon-bridge::capability) is a (Resource, Right) pair over pages/channels/devices with no window, input or display scopes and no event signing. Section 6 needs either a mapping onto Resource::Channel/Device or an extension in tpt-archon.
+- NOTE: tpt-nova (tpt-nova-app, tpt-nova-input) currently uses winit 0.30, and tpt-appfront-canvas has its own internal Win32/X11/macOS window layer. Both are adoption targets.

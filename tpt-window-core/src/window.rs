@@ -1,0 +1,201 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! [`Window`] handle and [`WindowBuilder`].
+
+use std::sync::Arc;
+
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+
+use crate::backend::{WindowAttributes, WindowBackend, WindowCommand};
+use crate::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
+use crate::error::WindowError;
+use crate::event_loop::EventLoop;
+use crate::ids::WindowId;
+use crate::security::{CapabilityToken, SurfaceHandle};
+
+/// Cheap-to-clone handle to a displayable surface.
+#[derive(Clone)]
+pub struct Window {
+    id: WindowId,
+    inner: Arc<dyn WindowBackend>,
+}
+
+impl std::fmt::Debug for Window {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Window").field("id", &self.id).finish()
+    }
+}
+
+impl Window {
+    pub(crate) fn from_backend(inner: Arc<dyn WindowBackend>) -> Self {
+        Self {
+            id: inner.id(),
+            inner,
+        }
+    }
+
+    /// Identifier used in events.
+    pub fn id(&self) -> WindowId {
+        self.id
+    }
+
+    /// Native window handle for wgpu surface creation.
+    pub fn raw_window_handle(&self) -> Result<RawWindowHandle, WindowError> {
+        self.inner.raw_window_handle()
+    }
+
+    /// Native display handle for wgpu surface creation.
+    pub fn raw_display_handle(&self) -> Result<RawDisplayHandle, WindowError> {
+        self.inner.raw_display_handle()
+    }
+
+    /// Zero-copy surface handle, if available.
+    pub fn surface_handle(&self) -> Option<SurfaceHandle> {
+        self.inner.surface_handle()
+    }
+
+    /// Inner size in physical pixels (cached; no syscall).
+    pub fn size(&self) -> PhysicalSize<u32> {
+        self.inner.state().snapshot().size
+    }
+
+    /// Inner size in logical units.
+    pub fn logical_size(&self) -> LogicalSize<f64> {
+        let s = self.inner.state().snapshot();
+        s.size.to_logical(s.scale_factor)
+    }
+
+    /// DPI scale factor.
+    pub fn scale_factor(&self) -> f64 {
+        self.inner.state().snapshot().scale_factor
+    }
+
+    /// Outer position in physical pixels.
+    pub fn position(&self) -> PhysicalPosition<i32> {
+        self.inner.state().snapshot().position
+    }
+
+    /// Has input focus.
+    pub fn is_focused(&self) -> bool {
+        self.inner.state().snapshot().focused
+    }
+
+    /// Is visible.
+    pub fn is_visible(&self) -> bool {
+        self.inner.state().snapshot().visible
+    }
+
+    /// Set the title (applied on next poll).
+    pub fn set_title(&self, title: &str) {
+        self.inner
+            .send_command(WindowCommand::SetTitle(title.to_owned()));
+    }
+
+    /// Resize (applied on next poll).
+    pub fn set_size(&self, size: PhysicalSize<u32>) {
+        self.inner.send_command(WindowCommand::SetSize(size));
+    }
+
+    /// Move (applied on next poll).
+    pub fn set_position(&self, pos: PhysicalPosition<i32>) {
+        self.inner.send_command(WindowCommand::SetPosition(pos));
+    }
+
+    /// Show or hide (applied on next poll).
+    pub fn set_visible(&self, visible: bool) {
+        self.inner.send_command(WindowCommand::SetVisible(visible));
+    }
+
+    /// Request a `RedrawRequested` event.
+    pub fn request_redraw(&self) {
+        self.inner.send_command(WindowCommand::RequestRedraw);
+    }
+}
+
+/// Builder for [`Window`].
+#[derive(Clone, Debug, Default)]
+pub struct WindowBuilder {
+    attrs: WindowAttributes,
+}
+
+impl WindowBuilder {
+    /// Defaults: resizable, visible, decorated, vsync on.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Title.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.attrs.title = title.into();
+        self
+    }
+
+    /// Initial inner size.
+    pub fn with_inner_size(mut self, size: LogicalSize<f64>) -> Self {
+        self.attrs.inner_size = Some(size);
+        self
+    }
+
+    /// Minimum size.
+    pub fn with_min_size(mut self, size: LogicalSize<f64>) -> Self {
+        self.attrs.min_size = Some(size);
+        self
+    }
+
+    /// Maximum size.
+    pub fn with_max_size(mut self, size: LogicalSize<f64>) -> Self {
+        self.attrs.max_size = Some(size);
+        self
+    }
+
+    /// Initial position.
+    pub fn with_position(mut self, pos: LogicalPosition<f64>) -> Self {
+        self.attrs.position = Some(pos);
+        self
+    }
+
+    /// User-resizable.
+    pub fn with_resizable(mut self, resizable: bool) -> Self {
+        self.attrs.resizable = resizable;
+        self
+    }
+
+    /// Initially visible.
+    pub fn with_visible(mut self, visible: bool) -> Self {
+        self.attrs.visible = visible;
+        self
+    }
+
+    /// OS decorations.
+    pub fn with_decorations(mut self, decorations: bool) -> Self {
+        self.attrs.decorations = decorations;
+        self
+    }
+
+    /// Transparent framebuffer.
+    pub fn with_transparent(mut self, transparent: bool) -> Self {
+        self.attrs.transparent = transparent;
+        self
+    }
+
+    /// Vertical sync.
+    pub fn with_vsync(mut self, vsync: bool) -> Self {
+        self.attrs.vsync = vsync;
+        self
+    }
+
+    /// Create the window through the capability-gated path.
+    pub fn with_capability(mut self, token: CapabilityToken) -> Self {
+        self.attrs.capability = Some(token);
+        self
+    }
+
+    /// The accumulated attributes.
+    pub fn attributes(&self) -> &WindowAttributes {
+        &self.attrs
+    }
+
+    /// Creates the window on `event_loop`.
+    pub fn build(self, event_loop: &EventLoop) -> Result<Window, WindowError> {
+        event_loop.create_window(&self.attrs)
+    }
+}
