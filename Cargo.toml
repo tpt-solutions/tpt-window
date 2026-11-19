@@ -11,6 +11,7 @@ members = [
     "tpt-window-sys-wasm",
     "tpt-window-archon",
     "tpt-window-test-utils",
+    "tpt-window-bench",
 ]
 
 [workspace.package]

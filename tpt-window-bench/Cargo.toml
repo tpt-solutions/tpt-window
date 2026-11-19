@@ -1,0 +1,17 @@
+[package]
+name = "tpt-window-bench"
+description = "Benchmark: tpt-window against winit 0.30 on the same caller-owned loop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The benchmark posts Win32 messages, so it only has dependencies on Windows.
+[target.'cfg(windows)'.dependencies]
+tpt-window = { path = "../tpt-window", version = "0.1.0" }
+winit = "0.30"
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

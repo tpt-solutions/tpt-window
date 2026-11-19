@@ -1,5 +1,10 @@
 # cargo-deny policy: permissive licenses only (spec section 3.2)
 
+[graph]
+# Unpublished workspace members (tpt-window-bench, a benchmark that is never shipped)
+# are left out of the graph, so its dependencies do not have to pass the shipped policy.
+exclude-unpublished = true
+
 [licenses]
 allow = [
     "MIT",
