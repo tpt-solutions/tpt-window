@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "README.md"
+keywords = ["x11", "xlib", "linux", "windowing", "xorg"]
+categories = ["os::unix-apis", "gui"]
 
 [dependencies]
 raw-window-handle = "0.6"

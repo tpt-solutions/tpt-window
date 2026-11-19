@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "README.md"
+keywords = ["windows", "win32", "windowing", "dpi", "raw-input"]
+categories = ["os::windows-apis", "gui"]
 
 [dependencies]
 raw-window-handle = "0.6"

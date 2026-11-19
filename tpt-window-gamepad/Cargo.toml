@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "README.md"
+keywords = ["gamepad", "controller", "gilrs", "input", "joystick"]
+categories = ["game-development", "hardware-support"]
 
 [dependencies]
 tpt-window-core = { workspace = true }

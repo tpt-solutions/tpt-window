@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "README.md"
+keywords = ["wasm", "webassembly", "canvas", "windowing", "web"]
+categories = ["wasm", "gui"]
 
 [dependencies]
 raw-window-handle = "0.6"

@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "README.md"
+keywords = ["headless", "testing", "windowing", "ci", "fuzzing"]
+categories = ["development-tools::testing", "gui"]
 
 [dependencies]
 tpt-window-core = { workspace = true }
