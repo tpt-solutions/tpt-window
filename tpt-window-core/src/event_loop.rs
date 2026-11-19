@@ -8,7 +8,7 @@ use crate::backend::{EventLoopBackend, PollStatus, WindowAttributes};
 use crate::error::WindowError;
 use crate::event::{Event, WindowEvent};
 use crate::ids::WindowId;
-use crate::sink::EventSink;
+use crate::sink::{EventSink, EventStatus};
 use crate::window::Window;
 
 /// Per-thread message pump. The caller owns the main loop and calls
@@ -68,14 +68,19 @@ impl EventLoop {
     fn finish_frame(&mut self, sink: &mut EventSink<'_>, status: PollStatus) -> PollStatus {
         if self.emit_yield_points {
             let timestamp_ns = u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            // If the queue is full the yield point is lost; the caller must drain.
-            let _ = sink.push(Event {
+            // If the queue is full the yield point is lost. That is counted as a
+            // drop, and the frame number keeps counting, so the caller sees a gap
+            // in `frame_number` and knows it missed a frame boundary.
+            let status = sink.push(Event {
                 window: WindowId::NONE,
                 event: WindowEvent::YieldPoint {
                     frame_number: self.frame,
                     timestamp_ns,
                 },
             });
+            if status == EventStatus::BufferFull {
+                sink.record_drop();
+            }
         }
         self.frame += 1;
         if self.exit.load(Ordering::Acquire) {
