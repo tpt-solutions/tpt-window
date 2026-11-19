@@ -3,3 +3,10 @@ Cargo.lock.bak
 *.swp
 .vscode/
 .idea/
+
+# Browser check harness build output
+tpt-window-sys-wasm/browser-check/target/
+tpt-window-sys-wasm/browser-check/www/pkg/
+tpt-window-sys-wasm/browser-check/node_modules/
+tpt-window-sys-wasm/browser-check/Cargo.lock
+tpt-window-sys-wasm/browser-check/package-lock.json

@@ -1,0 +1,16 @@
+[package]
+name = "wasm-browser-check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Browser check harness for the tpt-window web backend (not published)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tpt-window = { path = "../../tpt-window" }
+wasm-bindgen = "=0.2.130"
+
+# Standalone: this harness is not a member of the tpt-window workspace.
+[workspace]

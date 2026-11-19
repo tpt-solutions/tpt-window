@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>tpt-window browser check</title>
+</head>
+<body style="margin:0">
+<script type="module">
+import init, { start, tick } from './pkg/wasm_browser_check.js';
+await init();
+start();
+window.__last = '{}';
+setInterval(() => { window.__last = tick(); }, 16);
+</script>
+</body>
+</html>

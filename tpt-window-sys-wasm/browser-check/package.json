@@ -1,0 +1,9 @@
+{
+  "name": "tpt-window-browser-check",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Drives the wasm harness in a real Chromium and checks the events the web backend reports",
+  "scripts": { "check": "node check.mjs" },
+  "dependencies": { "playwright-core": "^1.65.1" }
+}
