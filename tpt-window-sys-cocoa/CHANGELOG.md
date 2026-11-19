@@ -12,10 +12,13 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - macOS backend on AppKit through `objc2` and `objc2-app-kit`: window creation,
   queued commands applied on poll, and `NSEvent` input forwarded to
   `NSApplication::sendEvent`.
+- A window delegate turns the close button into `CloseRequested` and keeps the window
+  open, so the application closes it by dropping its window, as on Win32 and Wayland.
+- Cursor enter and leave: a tracking area on the content view reports `CursorEntered`
+  and `CursorLeft`.
 - `tests/real_window.rs` with a custom `main` (`harness = false`), run on the macOS
   CI runner.
 
 ### Known gaps
-- Close cannot be vetoed (no window delegate).
-- No cursor enter/leave events (no tracking area).
 - No IME composition.
+- Compiled for macOS only so far; the changes above have not been run on a Mac.

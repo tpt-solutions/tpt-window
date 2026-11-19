@@ -20,16 +20,14 @@ This crate compiles only for macOS. On other platforms it is empty.
 - **Input.** The backend pumps `NSEvent`s, translates them into tpt-window events,
   and then forwards each event to `NSApplication::sendEvent`. AppKit keeps its
   normal behaviour, and no custom `NSView` subclass is needed.
-- **Close.** There is no window delegate yet, so clicking the close button closes
-  the window without asking. The backend reports `CloseRequested` followed by
-  `Destroyed`.
+- **Close.** A window delegate turns `windowShouldClose:` into `CloseRequested` and
+  keeps the window open. The application closes the window by dropping its window,
+  as on Win32 and Wayland.
+- **Cursor.** A tracking area on the content view reports `CursorEntered` and
+  `CursorLeft`.
 
 ## Known gaps
 
-- **Close cannot be vetoed.** Refusing a close needs a window delegate, which is
-  not written yet.
-- **No cursor enter/leave events.** These need an `NSTrackingArea`, which is not set
-  up.
 - **No IME.** Composition (`ImeEvent::Preedit`) is not started for Cocoa.
 - **No DPI verification on Retina displays** beyond the scale factor reported by
   AppKit. See the cross-platform DPI item in [todo.md](../todo.md).
