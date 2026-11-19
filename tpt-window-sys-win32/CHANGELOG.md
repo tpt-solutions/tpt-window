@@ -18,13 +18,15 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - Raw mouse motion from `WM_INPUT` (`WindowEvent::RawMouseMotion`). One window per
   process receives it.
 - IME composition as `ImeEvent::Preedit`, from `WM_IME_COMPOSITION`.
+- IME composition and candidate window placement: `Window::set_ime_cursor_area` is
+  applied with `ImmSetCompositionWindow` and `ImmSetCandidateWindow`, so the candidate
+  list opens under the text being composed.
 - Build and test as `i686-pc-windows-msvc`, with a CI job.
-- Tests: `real_window.rs`, `raw_input.rs` and `touch.rs`.
+- Tests: `real_window.rs`, `raw_input.rs`, `touch.rs` and `ime_area.rs`.
 
 ### Known gaps
 - Touch lift (`TouchPhase::Ended`) is not verified.
 - Pen input is not implemented.
 - `transparent` windows are not implemented; they need a renderer-side DXGI
   composition swapchain.
-- IME candidate window placement is not implemented, and IME has not been verified
-  with a real input method.
+- IME has not been verified with a real input method.

@@ -31,6 +31,8 @@ want the facade.
 - Keyboard (physical key codes), mouse buttons, wheel, text from `WM_CHAR`.
 - IME composition as `ImeEvent::Preedit` from `WM_IME_COMPOSITION`. Committed
   text arrives through the `WM_CHAR` path as `ImeEvent::Commit`.
+- IME placement: `Window::set_ime_cursor_area` sets the composition and candidate
+  windows, so the candidate list opens under the text being composed.
 - Touch down and move through `WM_TOUCH`, with the `WindowEvent::Touch` event.
 - Raw mouse motion as `WindowEvent::RawMouseMotion` from `WM_INPUT`. Only one
   window per process receives raw motion: the last one created.
@@ -45,9 +47,10 @@ want the facade.
 - **`transparent` windows.** Extending the DWM frame into the client area gives a
   white window, not a see-through one. Real transparency needs a DXGI composition
   swapchain with composite alpha, which belongs in the renderer.
-- **IME candidate window placement** (`ImmSetCandidateWindow`) is not started.
 - **Verification of IME** with a real Japanese or Chinese input method is
-  outstanding. The development machine and the CI runners have none installed.
+  outstanding. The development machine and the CI runners have none installed, so
+  the candidate-window placement is checked by reading the IME context back, not by
+  typing.
 
 ## Platform support
 
@@ -68,6 +71,8 @@ The tests create real Win32 windows on the current desktop:
 - `tests/raw_input.rs`: raw mouse input, verified with `SendInput`.
 - `tests/touch.rs`: touch down and move, verified with injected touch against a
   visible window.
+- `tests/ime_area.rs`: the IME composition and candidate areas set by
+  `set_ime_cursor_area`, read back through the window's IME context.
 
 ## Documentation
 
