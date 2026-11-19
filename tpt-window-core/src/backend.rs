@@ -83,6 +83,14 @@ pub enum WindowCommand {
     SetPosition(PhysicalPosition<i32>),
     /// Show or hide.
     SetVisible(bool),
+    /// Where the input method's composition and candidate windows open: the area of the
+    /// text being composed, in physical pixels relative to the client area.
+    SetImeCursorArea {
+        /// Top-left of the area.
+        position: PhysicalPosition<i32>,
+        /// Size of the area. The candidate list opens just below it.
+        size: PhysicalSize<u32>,
+    },
     /// Ask for a `RedrawRequested` event.
     RequestRedraw,
 }

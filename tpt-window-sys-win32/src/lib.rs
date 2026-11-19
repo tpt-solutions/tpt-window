@@ -4,7 +4,7 @@
 //!
 //! Design notes:
 //! * The window procedure runs inside `poll`/`step` (it is dispatched by our own message
-//!   pump), translates messages into [`Event`]s and pushes them into a pre-allocated
+//!   pump), translates messages into `Event`s and pushes them into a pre-allocated
 //!   thread-local ring. `poll` then moves them into the caller's sink. No allocation
 //!   happens on that path.
 //! * `Window` setters may be called from any thread: they enqueue a command and post a
@@ -39,7 +39,9 @@ use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::Input::Ime::{
-    GCS_COMPSTR, ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext,
+    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, GCS_COMPSTR,
+    ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow,
+    ImmSetCompositionWindow,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
@@ -763,11 +765,54 @@ fn apply_command(hwnd: HWND, d: &WindowData, cmd: WindowCommand) {
             unsafe { ShowWindow(hwnd, if v { SW_SHOW } else { SW_HIDE }) };
             d.state.update(|s| s.visible = v);
         }
+        WindowCommand::SetImeCursorArea { position, size } => {
+            set_ime_area(hwnd, position, size);
+        }
         WindowCommand::RequestRedraw => {
             unsafe { InvalidateRect(hwnd, null(), 0) };
         }
         _ => {}
     }
+}
+
+/// Places the input method's composition and candidate windows at `position`, which is
+/// the top-left of the text being composed, with `size` as its extent. Returns `false` if
+/// the window has no input context (no IME is active for it), in which case there is
+/// nothing to place.
+fn set_ime_area(hwnd: HWND, position: PhysicalPosition<i32>, size: PhysicalSize<u32>) -> bool {
+    // SAFETY: `hwnd` is a live window of this thread. The forms are plain structs that
+    // live for the duration of each call, and the context is released before returning.
+    unsafe {
+        let himc = ImmGetContext(hwnd);
+        if himc.is_null() {
+            return false;
+        }
+        let (x, y) = (position.x, position.y);
+        let area = RECT {
+            left: x,
+            top: y,
+            right: x + size.width as i32,
+            bottom: y + size.height as i32,
+        };
+        let composition = COMPOSITIONFORM {
+            dwStyle: CFS_POINT,
+            ptCurrentPos: POINT { x, y },
+            rcArea: area,
+        };
+        let candidate = CANDIDATEFORM {
+            dwIndex: 0,
+            dwStyle: CFS_CANDIDATEPOS,
+            ptCurrentPos: POINT {
+                x,
+                y: y + size.height as i32,
+            },
+            rcArea: area,
+        };
+        ImmSetCompositionWindow(himc, &composition);
+        ImmSetCandidateWindow(himc, &candidate);
+        ImmReleaseContext(hwnd, himc);
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------

@@ -105,6 +105,16 @@ impl Window {
         self.inner.send_command(WindowCommand::SetVisible(visible));
     }
 
+    /// Places the input method's composition and candidate windows at the text being
+    /// composed (physical pixels, relative to the client area). Applied on the next poll.
+    ///
+    /// Only Win32 acts on this so far. Other platforms accept the call and ignore it until
+    /// their IME support lands (see todo.md).
+    pub fn set_ime_cursor_area(&self, position: PhysicalPosition<i32>, size: PhysicalSize<u32>) {
+        self.inner
+            .send_command(WindowCommand::SetImeCursorArea { position, size });
+    }
+
     /// Request a `RedrawRequested` event.
     pub fn request_redraw(&self) {
         self.inner.send_command(WindowCommand::RequestRedraw);
