@@ -1,0 +1,330 @@
+tpt-window Design Specification
+Version: 0.1.0-draft
+Date: 2026-11-19
+Author: TPT Solutions
+Status: Pre-1.0 / Proposal
+License: MIT OR Apache-2.0
+1. Overview
+tpt-window is the foundational windowing, input, and surface-management layer of the TPT AV Stack. It is designed from first principles to be the definitive windowing solution for the tpt ecosystem — specifically tpt-nova (the AI-native ECS game engine), tpt-appfront (the high-level UI framework), and tpt-shell (the desktop compositor).
+Unlike existing Rust windowing libraries (winit, sdl2, glfw), tpt-window is built with four non-negotiable constraints:
+Engine-first, not app-first. The main loop is owned by the caller. No closure hijacking.
+Zero-allocation on the hot path. Input events flow through pre-allocated, lock-free ring buffers.
+ECS-native. Window state is exposed as data, not opaque handles.
+AI-agent aware. The main loop exposes explicit yield points for local inference without desynchronizing the display refresh.
+tpt-window also acts as the client-side protocol for tpt-archon (the capability-based microkernel) and tpt-shell (the compositor), enabling zero-copy frame sharing and capability-gated input routing.
+2. Goals & Non-Goals
+Goals
+Provide a unified, cross-platform API for window creation, input polling, and surface management.
+Guarantee zero heap allocation during event polling and frame submission.
+Integrate seamlessly with tpt-visual (wgpu) for GPU surface creation.
+Integrate with tpt-archon for capability-based security and zero-copy IPC.
+Integrate with tpt-shell as the client-side display protocol.
+Integrate with tpt-appfront as the low-level surface for high-level UI frameworks.
+Expose window state as ECS-compatible data (Resources/Components).
+Provide explicit AI-agent yield points in the main loop.
+Maintain a strictly permissive dependency tree (MIT / Apache-2.0 / BSD / ISC / Zlib only), enforced by cargo-deny.
+Non-Goals
+Not a GUI toolkit. tpt-window does not provide widgets, layout, or theming. That is tpt-appfront's job.
+Not a compositor. tpt-window does not composite windows. That is tpt-shell's job.
+Not a game framework. tpt-window does not provide scenes, entities, or physics. That is tpt-nova's job.
+Not a replacement for winit in arbitrary applications. tpt-window is opinionated toward engine and compositor workloads. Generic desktop apps should use tpt-appfront.
+Not a reimplementation of OS FFI from scratch. We wrap proven, permissively-licensed FFI crates (windows-rs, objc2, x11rb, wayland-client, web-sys).
+3. Architecture
+3.1 Workspace Layout
+tpt-window/
+├── Cargo.toml                      # Workspace root
+├── spec.txt                        # Short-form spec
+├── todo.md                         # Phased implementation tracker
+├── deny.toml                       # cargo-deny license policy
+├── tpt-window/                     # Facade crate (re-exports active backend)
+├── tpt-window-core/                # Platform-agnostic traits, types, event queue
+├── tpt-window-sys-win32/           # Windows backend (wraps `windows-rs`)
+├── tpt-window-sys-cocoa/           # macOS / iOS backend (wraps `objc2`, `core-graphics`)
+├── tpt-window-sys-x11/             # Linux X11 backend (wraps `x11rb`)
+├── tpt-window-sys-wayland/         # Linux Wayland backend (wraps `wayland-client` + sctk)
+├── tpt-window-sys-wasm/            # Web backend (wraps `web-sys`)
+├── tpt-window-archon/              # Capability bridge to tpt-archon (optional feature)
+└── tpt-window-test-utils/          # Headless backend for CI and fuzzing
+
+3.2 Dependency Policy
+All dependencies are audited via cargo-deny in CI. The allow-list is:
+MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unicode-3.0
+Banned: GPL, LGPL, AGPL, MPL, SSPL, BSL (unless statically linked and dynamically replaceable)
+Transitive dependencies are locked via Cargo.lock and reviewed on every bump.
+4. Core Concepts
+4.1 The EventLoop
+The EventLoop is the per-thread message pump. Unlike winit, it does not take ownership of the caller's main function.
+pub struct EventLoop {
+    inner: Box<dyn EventLoopBackend>,
+    event_queue: Arc<RingBuffer<WindowEvent>>,
+}
+
+impl EventLoop {
+    pub fn new() -> Result<Self, WindowError>;
+    
+    /// Non-blocking poll. Returns immediately.
+    /// Events are written into the caller-provided ring buffer.
+    pub fn poll_events(&self, sink: &mut EventSink) -> PollStatus;
+    
+    /// Blocking step. Returns when at least one event is available
+    /// or the timeout expires.
+    pub fn step(&self, sink: &mut EventSink, timeout: Duration) -> PollStatus;
+    
+    /// Request the loop to terminate on the next iteration.
+    pub fn request_exit(&self);
+}
+
+4.2 The Window
+A Window is a handle to a displayable surface. It is cheap to clone (it is an Arc-backed handle internally).
+
+pub struct Window {
+    id: WindowId,
+    inner: Arc<dyn WindowBackend>,
+}
+
+impl Window {
+    /// Get the raw window handle for wgpu surface creation.
+    pub fn raw_window_handle(&self) -> RawWindowHandle;
+    pub fn raw_display_handle(&self) -> RawDisplayHandle;
+    
+    /// Get a SurfaceHandle for zero-copy sharing with tpt-archon / tpt-shell.
+    pub fn surface_handle(&self) -> SurfaceHandle;
+    
+    /// Query current state (no syscalls; reads cached snapshot).
+    pub fn size(&self) -> PhysicalSize<u32>;
+    pub fn logical_size(&self) -> LogicalSize<f64>;
+    pub fn scale_factor(&self) -> f64;
+    pub fn position(&self) -> PhysicalPosition<i32>;
+    pub fn is_focused(&self) -> bool;
+    pub fn is_visible(&self) -> bool;
+    
+    /// Mutate state (sends command to backend; applied on next poll).
+    pub fn set_title(&self, title: &str);
+    pub fn set_size(&self, size: PhysicalSize<u32>);
+    pub fn set_position(&self, pos: PhysicalPosition<i32>);
+    pub fn set_visible(&self, visible: bool);
+    pub fn request_redraw(&self);
+}
+
+4.3 The WindowBuilder
+pub struct WindowBuilder {
+    title: String,
+    inner_size: Option<LogicalSize<f64>>,
+    min_size: Option<LogicalSize<f64>>,
+    max_size: Option<LogicalSize<f64>>,
+    position: Option<LogicalPosition<f64>>,
+    resizable: bool,
+    visible: bool,
+    decorations: bool,
+    transparent: bool,
+    vsync: bool,
+    /// Optional capability token from tpt-archon.
+    /// If provided, the window is created through the capability-gated path.
+    capability: Option<CapabilityToken>,
+}
+
+impl WindowBuilder {
+    pub fn new() -> Self;
+    pub fn with_title(mut self, title: impl Into<String>) -> Self;
+    pub fn with_inner_size(mut self, size: LogicalSize<f64>) -> Self;
+    // ... other builders ...
+    pub fn with_capability(mut self, token: CapabilityToken) -> Self;
+    pub fn build(self, event_loop: &EventLoop) -> Result<Window, WindowError>;
+}
+
+4.4 The WindowEvent Enum
+Events are Copy where possible. Large payloads (like text input) use a small-string optimization or reference into a pre-allocated arena.
+#[derive(Clone, Debug)]
+pub enum WindowEvent {
+    // Lifecycle
+    CloseRequested,
+    Destroyed,
+    
+    // Geometry
+    Resized(PhysicalSize<u32>),
+    Moved(PhysicalPosition<i32>),
+    ScaleFactorChanged { scale_factor: f64, new_inner_size: PhysicalSize<u32> },
+    
+    // Focus & Visibility
+    Focused(bool),
+    Occluded(bool),
+    
+    // Input (keyboard)
+    KeyboardInput { state: ElementState, key_code: KeyCode, physical_key: PhysicalKey },
+    Ime(ImeEvent),
+    
+    // Input (pointer)
+    CursorMoved { position: PhysicalPosition<f64>, pressure: f32 },
+    CursorEntered,
+    CursorLeft,
+    MouseInput { state: ElementState, button: MouseButton },
+    MouseWheel { delta: MouseScrollDelta, phase: TouchPhase },
+    
+    // Input (touch)
+    Touch(TouchEvent),
+    
+    // Input (gamepad — via tpt-av-control-midi or a future tpt-hid)
+    GamepadConnected(GamepadId),
+    GamepadDisconnected(GamepadId),
+    
+    // Rendering
+    RedrawRequested,
+    
+    // AI-Agent Yield Point
+    /// Emitted once per frame after all OS events are drained.
+    /// Signals that the engine may safely yield to an AI agent.
+    YieldPoint { frame_number: u64, timestamp_ns: u64 },
+}
+
+4.5 The EventSink and Zero-Allocation Ring Buffer
+The hot path is EventLoop::poll_events writing into an EventSink. The sink is backed by a pre-allocated, lock-free, single-producer single-consumer (SPSC) ring buffer.
+pub struct EventSink<'a> {
+    buffer: &'a mut RingBuffer<WindowEvent>,
+    captured: usize,
+}
+
+impl<'a> EventSink<'a> {
+    pub fn push(&mut self, event: WindowEvent) -> EventStatus;
+    pub fn captured_count(&self) -> usize;
+}
+
+pub enum EventStatus {
+    /// Event was accepted.
+    Accepted,
+    /// Event was rejected because the buffer is full.
+    /// The caller should drain the buffer and retry.
+    BufferFull,
+    /// Event was explicitly captured by the application.
+    /// No further events will be processed this poll.
+    Captured,
+}
+
+The RingBuffer is a fixed-capacity, heap-allocated-once, lock-free SPSC queue. It is allocated at EventLoop::new() and never resized. Capacity is configurable (default: 1024 events).
+Real-time safety guarantee: EventSink::push performs zero allocations. If the buffer is full, the backend drops the oldest event (configurable policy) or returns BufferFull. This is enforced by an allocation-counting test in CI (tpt-window-core/tests/rt_safety.rs).
+5. Integration Contracts
+5.1 tpt-window ↔ tpt-visual
+tpt-visual consumes the RawWindowHandle and RawDisplayHandle from tpt-window to create a wgpu::Surface. The contract is:
+tpt-window owns the window lifecycle.
+tpt-visual owns the GPU surface lifecycle.
+WindowEvent::Resized triggers tpt-visual to reconfigure the surface.
+WindowEvent::RedrawRequested triggers tpt-visual to render a frame.
+5.2 tpt-window ↔ tpt-archon
+tpt-window acts as a capability-gated client to tpt-archon. The contract is:
+WindowBuilder::with_capability(token) routes window creation through tpt-archon's IPC.
+tpt-archon validates the token and returns a SurfaceHandle (a zero-copy shared memory reference).
+Input events are routed by tpt-archon based on capability scope. A window can only receive events it is authorized for.
+If no capability is provided, tpt-window falls back to direct OS FFI (standalone mode).
+5.3 tpt-window ↔ tpt-shell
+tpt-window is the client-side protocol for tpt-shell. The contract is:
+tpt-shell owns the physical display and composites all windows.
+tpt-window sends surface updates (resize, move, content) to tpt-shell via a shared-memory channel.
+tpt-shell sends input events to tpt-window via the same channel.
+The protocol is versioned and documented in tpt-window-core/src/protocol.rs.
+5.4 tpt-window ↔ tpt-appfront
+tpt-appfront sits on top of tpt-window. The contract is:
+tpt-appfront creates a Window via tpt-window.
+tpt-appfront consumes WindowEvents and translates them into high-level UI events (button clicks, text input, focus changes).
+tpt-appfront manages its own widget tree and rendering on top of the tpt-window surface.
+6. Security Model
+6.1 Capability-Based Input Isolation
+Input events are not global. Each Window receives only the events it is authorized for. The CapabilityToken defines the scope:
+
+pub struct CapabilityToken {
+    pub window_scope: WindowScope,
+    pub input_scope: InputScope,
+    pub display_scope: DisplayScope,
+}
+
+pub enum InputScope {
+    /// Only events targeted at this window.
+    WindowOnly,
+    /// Events targeted at this window and its children.
+    WindowAndChildren,
+    /// Global events (requires elevated privilege from tpt-archon).
+    Global,
+}
+
+
+6.2 Spoofing Prevention
+tpt-archon cryptographically signs input events. tpt-window verifies the signature before delivering events to the application. This prevents a compromised application from injecting spoofed input into another window.
+6.3 Zero-Copy Frame Isolation
+Frames are shared via SurfaceHandle, which is a capability reference to a shared memory region. The application cannot directly access another application's frame buffer without the appropriate capability.
+7. Platform Backend Strategy
+Platform
+Backend Crate
+FFI Dependency
+FFI License
+Windows
+tpt-window-sys-win32
+windows-rs
+MIT OR Apache-2.0
+macOS / iOS
+tpt-window-sys-cocoa
+objc2, core-graphics
+MIT OR Apache-2.0
+Linux (X11)
+tpt-window-sys-x11
+x11rb
+MIT OR Apache-2.0
+Linux (Wayland)
+tpt-window-sys-wayland
+wayland-client, smithay-client-toolkit
+MIT
+Web (WASM)
+tpt-window-sys-wasm
+web-sys, wasm-bindgen
+MIT OR Apache-2.0
+Headless (CI)
+tpt-window-test-utils
+None
+MIT OR Apache-2.0
+All backends implement the same traits defined in tpt-window-core. The facade crate tpt-window re-exports the active backend based on #[cfg(target_os = ...)].
+8. Phased Rollout
+Phase 1: Core & Proof of Concept (Weeks 1–2)
+Scaffold workspace with all crates.
+Implement tpt-window-core: traits, types, RingBuffer, EventSink.
+Implement tpt-window-test-utils: headless backend for CI.
+Implement tpt-window-sys-wasm: Web backend (easiest to prove API).
+Implement tpt-window-sys-win32: Windows backend.
+Real-time safety test: allocation-counting harness.
+cargo-deny policy in CI.
+Phase 2: Engine Integration (Weeks 3–4)
+Wire tpt-window into tpt-nova ECS.
+Create WindowResource and InputEventQueue components.
+Replace winit in tpt-nova for Windows and WASM targets.
+Implement AI-agent yield point in main loop.
+Integrate with tpt-visual for GPU surface creation.
+Phase 3: Hard Platforms (Weeks 5–8)
+Implement tpt-window-sys-cocoa: macOS / iOS backend.
+Implement tpt-window-sys-x11: Linux X11 backend.
+Implement tpt-window-sys-wayland: Linux Wayland backend (using smithay-client-toolkit).
+DPI scaling and Retina support across all platforms.
+Phase 4: Capability & Compositor Integration (Weeks 9–12)
+Implement tpt-window-archon: capability bridge.
+Define protocol with tpt-shell.
+Zero-copy frame sharing via SurfaceHandle.
+Capability-gated input routing.
+Phase 5: Polish & Documentation (Weeks 13–14)
+Comprehensive API documentation.
+Migration guide from winit.
+Performance benchmarks vs. winit.
+Publish to crates.io.
+9. Success Criteria
+tpt-window is considered successful when:
+Zero allocation on hot path. CI enforces this via allocation-counting tests.
+Main loop control. The caller owns the main loop. No closure hijacking.
+ECS-native. Window state is exposed as data, not opaque handles.
+AI-agent aware. Yield points are exposed and tested.
+Capability-aware. Integrates with tpt-archon for security.
+Compositor-aware. Integrates with tpt-shell as a client protocol.
+Permissive-only. cargo-deny passes with zero violations.
+Cross-platform. Windows, macOS, Linux (X11 + Wayland), and Web all work.
+Performance. Matches or exceeds winit in event throughput and latency.
+Adoption. tpt-nova, tpt-appfront, and tpt-shell all use tpt-window as their windowing layer.
+10. Open Questions
+Wayland protocol version. Which version of xdg-shell should we target? (Recommendation: xdg-shell v5, the current stable.)
+Input method support. Should we support IME (Input Method Editor) in Phase 1, or defer to Phase 3? (Recommendation: defer, but design the API to support it.)
+Multi-window. Should tpt-window support multiple windows per EventLoop, or one window per EventLoop? (Recommendation: multiple windows per EventLoop, matching winit.)
+Clipboard. Should tpt-window provide clipboard access, or defer to a separate crate? (Recommendation: defer to tpt-archon.)
+11. License
+This specification is dual-licensed under MIT OR Apache-2.0. Contributions are accepted under the same terms and must not introduce copyleft (GPL/LGPL/AGPL/MPL) dependencies.

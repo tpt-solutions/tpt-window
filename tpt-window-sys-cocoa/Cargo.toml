@@ -1,0 +1,12 @@
+[package]
+name = "tpt-window-sys-cocoa"
+description = "tpt-window-sys-cocoa: part of the tpt-window windowing layer for the TPT AV Stack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tpt-window-core = { workspace = true }

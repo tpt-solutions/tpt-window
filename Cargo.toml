@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = [
+    "tpt-window",
+    "tpt-window-core",
+    "tpt-window-sys-win32",
+    "tpt-window-sys-cocoa",
+    "tpt-window-sys-x11",
+    "tpt-window-sys-wayland",
+    "tpt-window-sys-wasm",
+    "tpt-window-archon",
+    "tpt-window-test-utils",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["TPT Solutions"]
+repository = "https://github.com/tpt-solutions/tpt-window"
+rust-version = "1.85"
+
+[workspace.dependencies]
+tpt-window-core = { path = "tpt-window-core", version = "0.1.0" }
