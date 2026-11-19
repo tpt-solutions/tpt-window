@@ -78,6 +78,17 @@ pub enum WindowEvent {
     /// Touch update.
     Touch(TouchEvent),
 
+    // Raw input
+    /// Relative mouse motion from the raw input device, before pointer acceleration.
+    /// Delivered whether or not the cursor moves on screen (for example in games).
+    /// Only one window receives it: the window that registered for raw input.
+    RawMouseMotion {
+        /// Horizontal counts.
+        dx: i32,
+        /// Vertical counts (positive is down).
+        dy: i32,
+    },
+
     // Gamepad
     /// Gamepad connected.
     GamepadConnected(GamepadId),

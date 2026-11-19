@@ -45,6 +45,10 @@ use windows_sys::Win32::UI::Input::Touch::{
     CloseTouchInputHandle, GetTouchInputInfo, RegisterTouchWindow, TOUCHEVENTF_DOWN,
     TOUCHEVENTF_UP, TOUCHINPUT,
 };
+use windows_sys::Win32::UI::Input::{
+    GetRawInputData, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK,
+    RIM_TYPEMOUSE, RegisterRawInputDevices,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 /// Not in the enabled windows-sys feature set; value from winuser.h.
@@ -478,6 +482,52 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             );
             return 0;
         }
+        WM_INPUT => {
+            let header = size_of::<RAWINPUTHEADER>() as u32;
+            let mut size = 0_u32;
+            unsafe {
+                GetRawInputData(
+                    lparam as _,
+                    RID_INPUT,
+                    core::ptr::null_mut(),
+                    &mut size,
+                    header,
+                )
+            };
+            if size > 0 {
+                let mut buf = vec![0_u8; size as usize];
+                let got = unsafe {
+                    GetRawInputData(
+                        lparam as _,
+                        RID_INPUT,
+                        buf.as_mut_ptr().cast(),
+                        &mut size,
+                        header,
+                    )
+                };
+                if got != u32::MAX && buf.len() >= size_of::<RAWINPUT>() {
+                    // SAFETY: the buffer holds a RAWINPUT written by the system; it is
+                    // read unaligned because the Vec<u8> is not aligned for it.
+                    let raw = unsafe { core::ptr::read_unaligned(buf.as_ptr().cast::<RAWINPUT>()) };
+                    if raw.header.dwType == RIM_TYPEMOUSE {
+                        // SAFETY: dwType says the union holds a mouse report.
+                        let mouse = unsafe { raw.data.mouse };
+                        // Absolute devices (touch screens, tablets) report absolute
+                        // positions, so only relative motion is forwarded.
+                        if mouse.usFlags & 1 == 0 {
+                            push_event(
+                                id,
+                                WindowEvent::RawMouseMotion {
+                                    dx: mouse.lLastX,
+                                    dy: mouse.lLastY,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
         WM_TOUCH => {
             let count = wparam;
             let mut inputs: Vec<TOUCHINPUT> = vec![unsafe { core::mem::zeroed() }; count];
@@ -846,6 +896,16 @@ impl EventLoopBackend for Win32EventLoop {
         if !hwnd.is_null() {
             // Ask for WM_TOUCH from this window's touch input.
             unsafe { RegisterTouchWindow(hwnd, 0) };
+            // Raw mouse input goes to one window per process: the last one created.
+            let mouse = RAWINPUTDEVICE {
+                usUsagePage: 0x01,
+                usUsage: 0x02,
+                dwFlags: RIDEV_INPUTSINK,
+                hwndTarget: hwnd,
+            };
+            unsafe {
+                RegisterRawInputDevices(&mouse, 1, size_of::<RAWINPUTDEVICE>() as u32);
+            }
         }
         if hwnd.is_null() {
             // SAFETY: WM_NCCREATE may not have run, so reclaim the reference we leaked.
