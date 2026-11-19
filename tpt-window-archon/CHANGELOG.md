@@ -9,4 +9,9 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 ## [Unreleased]
 
 ### Added
-- Crate scaffold for the tpt-archon capability bridge. It contains no code yet.
+- Capability mapping (`capability`): window scopes onto archon's channel and device
+  resources. Child-window scopes are rejected.
+- Signed input events (`envelope`): Ed25519, with per-window sequence numbers against
+  replay and reordering.
+- `WindowRouter` (`router`): capability-gated delivery and receive over a generic `Authority`.
+- Tests: 10 unit tests and 9 routing tests against a mock authority.
