@@ -22,6 +22,8 @@ tpt-window = { git = "https://github.com/tpt-solutions/tpt-window" }
   decides whether to drop its window, so it can veto a close.
 - **Keyboard.** The xkb keymap is handled through sctk. Text input comes from
   `ImeEvent::Commit`.
+- **Key repeat.** sctk's repeat timer runs on the event loop. A held key sends
+  repeated `Pressed` events through the same path as a normal key press.
 - **Runtime loading.** `wayland-backend` is built with `dlopen`, so compiling does
   not need the Wayland development packages.
 
@@ -38,7 +40,6 @@ events rather than assume the request took effect.
 
 ## Known gaps
 
-- **No key repeat.** The backend does not generate repeat events.
 - **No IME composition.** Text-input v3 is not implemented, so `Preedit` is never
   produced.
 

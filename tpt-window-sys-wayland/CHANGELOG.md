@@ -14,9 +14,11 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - Client library loaded at runtime (`dlopen`), so building does not need Wayland
   development packages.
 - Lifecycle test (`tests/real_window.rs`) in a CI job with headless Weston.
+- Key repeat from sctk's repeat timer: a held key sends repeated `Pressed` events
+  (text included), sharing the press path with the normal key event.
 
 ### Notes
 - `SetSize`, `SetPosition` and `SetVisible` are ignored, because Wayland does not
   let clients set them.
-- No key repeat and no IME composition yet.
+- No IME composition yet.
 - Not yet tested on a real compositor.
