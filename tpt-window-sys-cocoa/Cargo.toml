@@ -10,3 +10,11 @@ rust-version.workspace = true
 
 [dependencies]
 tpt-window-core = { workspace = true }
+
+[dependencies.raw-window-handle]
+version = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSDate", "NSThread", "NSRunLoop"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSEvent", "NSView", "NSScreen", "NSResponder", "NSGraphics", "NSRunningApplication", "NSColor", "NSWindowController", "NSGraphicsContext", "NSText", "NSMenu"] }

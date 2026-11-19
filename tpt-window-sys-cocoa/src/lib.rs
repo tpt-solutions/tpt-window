@@ -1,2 +1,752 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! tpt-window-sys-cocoa (scaffold; see todo.md).
+//! macOS backend for tpt-window, built on AppKit through `objc2`.
+//!
+//! Design notes:
+//! - Everything AppKit runs on the thread that created the [`EventLoop`]
+//!   (`MainThreadMarker`). Other threads only queue commands, which are applied
+//!   on the next poll.
+//! - Input is read by pumping `NSEvent`s and translating them, then forwarding each
+//!   event to `NSApplication::sendEvent` so AppKit keeps its normal behaviour. This
+//!   avoids declaring a custom `NSView` subclass.
+//! - There is no window delegate yet, so a close button click closes the window
+//!   without asking first. The backend reports that as `CloseRequested` followed by
+//!   `Destroyed`. A veto needs a delegate (see todo.md).
+//! - Cursor enter/leave events need a tracking area, which is not set up yet.
+//!
+//! Only the macOS build is compiled; on other platforms this crate is empty.
+#![cfg(target_os = "macos")]
+#![warn(missing_docs)]
+
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::ffi::c_void;
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use objc2::rc::Retained;
+use objc2::{MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
+    NSEventModifierFlags, NSEventType, NSScreen, NSWindow, NSWindowStyleMask,
+};
+use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
+use raw_window_handle::{
+    AppKitDisplayHandle, AppKitWindowHandle, RawDisplayHandle, RawWindowHandle,
+};
+use tpt_window_core::*;
+
+// ---------------------------------------------------------------------------
+// Thread-local state (main thread only)
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Events waiting for the sink. Filled while AppKit events are translated.
+    static PENDING: RefCell<RingBuffer<Event>> =
+        RefCell::new(RingBuffer::with_capacity(4096).with_policy(OverflowPolicy::DropOldest));
+
+    /// Every live window on this thread, with the AppKit object that backs it.
+    static WINDOWS: RefCell<Vec<Record>> = const { RefCell::new(Vec::new()) };
+}
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn push_event(window: WindowId, event: WindowEvent) {
+    PENDING.with(|p| {
+        p.borrow_mut().push(Event { window, event });
+    });
+}
+
+struct Record {
+    ns_window: Retained<NSWindow>,
+    data: Arc<WindowData>,
+}
+
+/// State shared between the main-thread record and the `Window` handle.
+struct WindowData {
+    id: WindowId,
+    state: Arc<SharedWindowState>,
+    commands: Mutex<VecDeque<WindowCommand>>,
+    /// Address of the content `NSView`, or 0 once the window is destroyed.
+    view: AtomicUsize,
+    /// Set when the last handle is dropped; the poll loop then destroys the window.
+    destroy_requested: AtomicBool,
+}
+
+// ---------------------------------------------------------------------------
+// Coordinates
+// ---------------------------------------------------------------------------
+
+/// Height of the main screen in points, used to convert AppKit's bottom-left origin
+/// into the top-left origin tpt-window uses.
+fn screen_height(mtm: MainThreadMarker) -> f64 {
+    NSScreen::mainScreen(mtm).map_or(0.0, |s| s.frame().size.height)
+}
+
+fn content_size_points(window: &NSWindow) -> (f64, f64) {
+    window
+        .contentView()
+        .map(|v| {
+            let f = v.frame();
+            (f.size.width, f.size.height)
+        })
+        .unwrap_or((0.0, 0.0))
+}
+
+/// Physical size of the content area.
+fn physical_size(window: &NSWindow) -> PhysicalSize<u32> {
+    let scale = window.backingScaleFactor();
+    let (w, h) = content_size_points(window);
+    PhysicalSize::new(
+        (w * scale).round().max(0.0) as u32,
+        (h * scale).round().max(0.0) as u32,
+    )
+}
+
+/// Physical top-left position of the window frame.
+fn physical_position(window: &NSWindow, mtm: MainThreadMarker) -> PhysicalPosition<i32> {
+    let scale = window.backingScaleFactor();
+    let frame = window.frame();
+    let top = screen_height(mtm) - (frame.origin.y + frame.size.height);
+    PhysicalPosition::new(
+        (frame.origin.x * scale).round() as i32,
+        (top * scale).round() as i32,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard mapping (kVK_* virtual key codes, which name physical key positions)
+// ---------------------------------------------------------------------------
+
+/// Maps a macOS virtual key code to a [`KeyCode`]. Codes name physical positions, so
+/// the result does not depend on the keyboard layout.
+fn key_from_vk(vk: u16) -> KeyCode {
+    match vk {
+        0x00 => KeyCode::A,
+        0x01 => KeyCode::S,
+        0x02 => KeyCode::D,
+        0x03 => KeyCode::F,
+        0x04 => KeyCode::H,
+        0x05 => KeyCode::G,
+        0x06 => KeyCode::Z,
+        0x07 => KeyCode::X,
+        0x08 => KeyCode::C,
+        0x09 => KeyCode::V,
+        0x0B => KeyCode::B,
+        0x0C => KeyCode::Q,
+        0x0D => KeyCode::W,
+        0x0E => KeyCode::E,
+        0x0F => KeyCode::R,
+        0x10 => KeyCode::Y,
+        0x11 => KeyCode::T,
+        0x12 => KeyCode::Digit1,
+        0x13 => KeyCode::Digit2,
+        0x14 => KeyCode::Digit3,
+        0x15 => KeyCode::Digit4,
+        0x16 => KeyCode::Digit6,
+        0x17 => KeyCode::Digit5,
+        0x18 => KeyCode::Equal,
+        0x19 => KeyCode::Digit9,
+        0x1A => KeyCode::Digit7,
+        0x1B => KeyCode::Minus,
+        0x1C => KeyCode::Digit8,
+        0x1D => KeyCode::Digit0,
+        0x1E => KeyCode::BracketRight,
+        0x1F => KeyCode::O,
+        0x20 => KeyCode::U,
+        0x21 => KeyCode::BracketLeft,
+        0x22 => KeyCode::I,
+        0x23 => KeyCode::P,
+        0x24 => KeyCode::Enter,
+        0x25 => KeyCode::L,
+        0x26 => KeyCode::J,
+        0x27 => KeyCode::Quote,
+        0x28 => KeyCode::K,
+        0x29 => KeyCode::Semicolon,
+        0x2A => KeyCode::Backslash,
+        0x2B => KeyCode::Comma,
+        0x2C => KeyCode::Slash,
+        0x2D => KeyCode::N,
+        0x2E => KeyCode::M,
+        0x2F => KeyCode::Period,
+        0x30 => KeyCode::Tab,
+        0x31 => KeyCode::Space,
+        0x32 => KeyCode::Backquote,
+        0x33 => KeyCode::Backspace,
+        0x35 => KeyCode::Escape,
+        0x36 => KeyCode::SuperRight,
+        0x37 => KeyCode::SuperLeft,
+        0x38 => KeyCode::ShiftLeft,
+        0x39 => KeyCode::CapsLock,
+        0x3A => KeyCode::AltLeft,
+        0x3B => KeyCode::ControlLeft,
+        0x3C => KeyCode::ShiftRight,
+        0x3D => KeyCode::AltRight,
+        0x3E => KeyCode::ControlRight,
+        0x41 => KeyCode::NumpadDecimal,
+        0x43 => KeyCode::NumpadMultiply,
+        0x45 => KeyCode::NumpadAdd,
+        0x4B => KeyCode::NumpadDivide,
+        0x4C => KeyCode::NumpadEnter,
+        0x4E => KeyCode::NumpadSubtract,
+        0x52 => KeyCode::Numpad0,
+        0x53 => KeyCode::Numpad1,
+        0x54 => KeyCode::Numpad2,
+        0x55 => KeyCode::Numpad3,
+        0x56 => KeyCode::Numpad4,
+        0x57 => KeyCode::Numpad5,
+        0x58 => KeyCode::Numpad6,
+        0x59 => KeyCode::Numpad7,
+        0x5B => KeyCode::Numpad8,
+        0x5C => KeyCode::Numpad9,
+        0x60 => KeyCode::F5,
+        0x61 => KeyCode::F6,
+        0x62 => KeyCode::F7,
+        0x63 => KeyCode::F3,
+        0x64 => KeyCode::F8,
+        0x65 => KeyCode::F9,
+        0x67 => KeyCode::F11,
+        0x6D => KeyCode::F10,
+        0x6F => KeyCode::F12,
+        0x72 => KeyCode::Insert,
+        0x73 => KeyCode::Home,
+        0x74 => KeyCode::PageUp,
+        0x75 => KeyCode::Delete,
+        0x76 => KeyCode::F4,
+        0x77 => KeyCode::End,
+        0x78 => KeyCode::F2,
+        0x79 => KeyCode::PageDown,
+        0x7A => KeyCode::F1,
+        0x7B => KeyCode::ArrowLeft,
+        0x7C => KeyCode::ArrowRight,
+        0x7D => KeyCode::ArrowDown,
+        0x7E => KeyCode::ArrowUp,
+        _ => KeyCode::Unidentified,
+    }
+}
+
+/// Whether a virtual key code is a modifier, and which device-dependent flag bit
+/// reports it (from IOKit's NX_DEVICE* masks).
+fn modifier_device_bit(vk: u16) -> Option<u64> {
+    match vk {
+        0x38 => Some(0x0000_0002), // left shift
+        0x3C => Some(0x0000_0004), // right shift
+        0x3B => Some(0x0000_0001), // left control
+        0x3E => Some(0x0000_2000), // right control
+        0x3A => Some(0x0000_0020), // left option
+        0x3D => Some(0x0000_0040), // right option
+        0x37 => Some(0x0000_0008), // left command
+        0x36 => Some(0x0000_0010), // right command
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NSEvent translation (main thread)
+// ---------------------------------------------------------------------------
+
+fn mouse_button(button_number: isize) -> MouseButton {
+    match button_number {
+        0 => MouseButton::Left,
+        1 => MouseButton::Right,
+        2 => MouseButton::Middle,
+        3 => MouseButton::Back,
+        4 => MouseButton::Forward,
+        n => MouseButton::Other(n.clamp(0, i64::from(u16::MAX) as isize) as u16),
+    }
+}
+
+/// Queues `Commit` events for `text`, split into chunks that fit an [`ImeText`].
+fn push_text(id: WindowId, mut text: &str) {
+    while !text.is_empty() {
+        let (chunk, rest) = ImeText::take_chunk(text);
+        let continued = !rest.is_empty();
+        push_event(
+            id,
+            WindowEvent::Ime(ImeEvent::Commit {
+                text: chunk,
+                continued,
+            }),
+        );
+        text = rest;
+    }
+}
+
+/// Translates one AppKit event for `record` and queues the resulting events.
+fn translate(record: &Record, event: &NSEvent, mtm: MainThreadMarker) {
+    let id = record.data.id;
+    let window = &record.ns_window;
+    let scale = window.backingScaleFactor();
+    let ty = event.r#type();
+
+    let pointer = |event: &NSEvent| -> PhysicalPosition<f64> {
+        let p = event.locationInWindow();
+        let (_, h) = content_size_points(window);
+        // AppKit's origin is bottom-left; tpt-window's is top-left.
+        PhysicalPosition::new(p.x * scale, (h - p.y) * scale)
+    };
+
+    match ty {
+        NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown => {
+            let button = match ty {
+                NSEventType::LeftMouseDown => MouseButton::Left,
+                NSEventType::RightMouseDown => MouseButton::Right,
+                _ => mouse_button(event.buttonNumber()),
+            };
+            push_event(
+                id,
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button,
+                },
+            );
+        }
+        NSEventType::LeftMouseUp | NSEventType::RightMouseUp | NSEventType::OtherMouseUp => {
+            let button = match ty {
+                NSEventType::LeftMouseUp => MouseButton::Left,
+                NSEventType::RightMouseUp => MouseButton::Right,
+                _ => mouse_button(event.buttonNumber()),
+            };
+            push_event(
+                id,
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button,
+                },
+            );
+        }
+        NSEventType::MouseMoved
+        | NSEventType::LeftMouseDragged
+        | NSEventType::RightMouseDragged
+        | NSEventType::OtherMouseDragged => {
+            push_event(
+                id,
+                WindowEvent::CursorMoved {
+                    position: pointer(event),
+                    pressure: 0.0,
+                },
+            );
+        }
+        NSEventType::ScrollWheel => {
+            let delta = if event.hasPreciseScrollingDeltas() {
+                MouseScrollDelta::PixelDelta {
+                    x: event.scrollingDeltaX() * scale,
+                    y: event.scrollingDeltaY() * scale,
+                }
+            } else {
+                MouseScrollDelta::LineDelta {
+                    x: event.scrollingDeltaX() as f32,
+                    y: event.scrollingDeltaY() as f32,
+                }
+            };
+            push_event(
+                id,
+                WindowEvent::MouseWheel {
+                    delta,
+                    phase: TouchPhase::Moved,
+                },
+            );
+        }
+        NSEventType::KeyDown => {
+            let vk = event.keyCode();
+            let code = key_from_vk(vk);
+            push_event(
+                id,
+                WindowEvent::KeyboardInput {
+                    state: ElementState::Pressed,
+                    key_code: code,
+                    physical_key: PhysicalKey::Code(code),
+                },
+            );
+            if let Some(chars) = event.characters() {
+                let text = chars.to_string();
+                // Control characters (arrows, Escape, Return) are not text.
+                if text.chars().all(|c| !c.is_control()) {
+                    push_text(id, &text);
+                }
+            }
+        }
+        NSEventType::KeyUp => {
+            let code = key_from_vk(event.keyCode());
+            push_event(
+                id,
+                WindowEvent::KeyboardInput {
+                    state: ElementState::Released,
+                    key_code: code,
+                    physical_key: PhysicalKey::Code(code),
+                },
+            );
+        }
+        NSEventType::FlagsChanged => {
+            let vk = event.keyCode();
+            if let Some(bit) = modifier_device_bit(vk) {
+                let flags: NSEventModifierFlags = event.modifierFlags();
+                let pressed = (flags.0 as u64) & bit != 0;
+                let code = key_from_vk(vk);
+                push_event(
+                    id,
+                    WindowEvent::KeyboardInput {
+                        state: if pressed {
+                            ElementState::Pressed
+                        } else {
+                            ElementState::Released
+                        },
+                        key_code: code,
+                        physical_key: PhysicalKey::Code(code),
+                    },
+                );
+            }
+        }
+        _ => {}
+    }
+    // Keep mtm in the signature: translation is only valid on the main thread.
+    let _ = mtm;
+}
+
+// ---------------------------------------------------------------------------
+// Window bookkeeping (main thread)
+// ---------------------------------------------------------------------------
+
+/// Applies queued commands and reports window state changes for one record.
+fn sync_record(record: &Record, mtm: MainThreadMarker) {
+    let window = &record.ns_window;
+    let data = &record.data;
+
+    // Commands from handles.
+    let commands: Vec<WindowCommand> = {
+        let mut q = data.commands.lock().unwrap_or_else(|e| e.into_inner());
+        q.drain(..).collect()
+    };
+    for cmd in commands {
+        match cmd {
+            WindowCommand::SetTitle(t) => window.setTitle(&NSString::from_str(&t)),
+            WindowCommand::SetSize(size) => {
+                let scale = window.backingScaleFactor();
+                window.setContentSize(NSSize::new(
+                    f64::from(size.width) / scale,
+                    f64::from(size.height) / scale,
+                ));
+            }
+            WindowCommand::SetPosition(p) => {
+                let scale = window.backingScaleFactor();
+                let top = f64::from(p.y) / scale;
+                let x = f64::from(p.x) / scale;
+                window.setFrameTopLeftPoint(NSPoint::new(x, screen_height(mtm) - top));
+            }
+            WindowCommand::SetVisible(v) => {
+                if v {
+                    window.orderFront(None);
+                } else {
+                    window.orderOut(None);
+                }
+                data.state.update(|s| s.visible = v);
+            }
+            WindowCommand::RequestRedraw => {
+                if let Some(view) = window.contentView() {
+                    view.setNeedsDisplay(true);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Closed by the user (no delegate to veto it): the window is no longer visible
+    // and the app is not hidden.
+    let app_hidden = NSApplication::sharedApplication(mtm).isHidden();
+    if data.state.snapshot().visible && !window.isVisible() && !app_hidden {
+        push_event(data.id, WindowEvent::CloseRequested);
+        // Let `reap_windows` close the window and report `Destroyed`.
+        data.destroy_requested.store(true, Ordering::Release);
+        return;
+    }
+
+    // State diffs.
+    let prev = data.state.snapshot();
+    let size = physical_size(window);
+    let pos = physical_position(window, mtm);
+    let scale = window.backingScaleFactor();
+    let focused = window.isKeyWindow();
+    let visible = window.isVisible();
+
+    if size != prev.size {
+        push_event(data.id, WindowEvent::Resized(size));
+    }
+    if pos != prev.position {
+        push_event(data.id, WindowEvent::Moved(pos));
+    }
+    if (scale - prev.scale_factor).abs() > f64::EPSILON {
+        push_event(
+            data.id,
+            WindowEvent::ScaleFactorChanged {
+                scale_factor: scale,
+                new_inner_size: size,
+            },
+        );
+    }
+    if focused != prev.focused {
+        push_event(data.id, WindowEvent::Focused(focused));
+    }
+    data.state.update(|s| {
+        s.size = size;
+        s.position = pos;
+        s.scale_factor = scale;
+        s.focused = focused;
+        s.visible = visible;
+    });
+}
+
+/// Destroys windows whose last handle was dropped, and drops records of closed ones.
+fn reap_windows(mtm: MainThreadMarker) {
+    let _ = mtm;
+    WINDOWS.with(|w| {
+        let mut windows = w.borrow_mut();
+        windows.retain(|record| {
+            let gone = record.data.destroy_requested.load(Ordering::Acquire);
+            if gone {
+                record.ns_window.orderOut(None);
+                record.ns_window.close();
+                record.data.view.store(0, Ordering::Release);
+                push_event(record.data.id, WindowEvent::Destroyed);
+            }
+            !gone
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Backend
+// ---------------------------------------------------------------------------
+
+/// The macOS event loop.
+pub struct MacEventLoop {
+    exit: Arc<AtomicBool>,
+    mtm: MainThreadMarker,
+}
+
+/// Creates an [`EventLoop`] backed by AppKit. Must be called on the main thread,
+/// which then pumps it.
+pub fn new_event_loop() -> Result<EventLoop, WindowError> {
+    let mtm = MainThreadMarker::new().ok_or_else(|| {
+        WindowError::Os("the macOS event loop must be created on the main thread".into())
+    })?;
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    app.finishLaunching();
+    // Force the thread-local ring to allocate now, not on the hot path.
+    PENDING.with(|_| {});
+    Ok(EventLoop::with_backend(Box::new(MacEventLoop {
+        exit: Arc::new(AtomicBool::new(false)),
+        mtm,
+    })))
+}
+
+impl MacEventLoop {
+    /// Pulls AppKit events, translates them, and forwards each to the application.
+    /// If `first_wait` is set, blocks up to that long for the first event.
+    fn pump(&self, first_wait: Option<Duration>) {
+        let app = NSApplication::sharedApplication(self.mtm);
+        let mode = unsafe { NSDefaultRunLoopMode };
+        let first_expiry =
+            first_wait.map(|d| NSDate::dateWithTimeIntervalSinceNow(d.as_secs_f64()));
+        let mut expiry = first_expiry;
+        let past = NSDate::distantPast();
+        loop {
+            let deadline = expiry.as_deref().unwrap_or(&past);
+            let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                NSEventMask(u64::MAX),
+                Some(deadline),
+                mode,
+                true,
+            ) else {
+                break;
+            };
+            expiry = None;
+            self.dispatch(&event);
+            app.sendEvent(&event);
+        }
+        reap_windows(self.mtm);
+    }
+
+    /// Routes one AppKit event to the window it belongs to.
+    fn dispatch(&self, event: &NSEvent) {
+        let Some(target) = event.window(self.mtm) else {
+            return;
+        };
+        let target_ptr: *const NSWindow = &*target;
+        WINDOWS.with(|w| {
+            if let Some(record) = w
+                .borrow()
+                .iter()
+                .find(|r| std::ptr::eq(&*r.ns_window, target_ptr))
+            {
+                translate(record, event, self.mtm);
+            }
+        });
+    }
+
+    /// Applies window commands and state diffs, then moves queued events to `sink`.
+    fn deliver(&self, sink: &mut EventSink<'_>) -> PollStatus {
+        WINDOWS.with(|w| {
+            let windows = w.borrow();
+            for record in windows.iter() {
+                sync_record(record, self.mtm);
+            }
+        });
+        reap_windows(self.mtm);
+
+        let mut delivered = false;
+        while let Some(ev) = PENDING.with(|p| p.borrow().front()) {
+            match sink.push(ev) {
+                EventStatus::Accepted => {
+                    PENDING.with(|p| p.borrow_mut().pop());
+                    delivered = true;
+                }
+                EventStatus::BufferFull | EventStatus::Captured => break,
+            }
+        }
+        if self.exit.load(Ordering::Acquire) {
+            PollStatus::Exit
+        } else if delivered {
+            PollStatus::Events
+        } else {
+            PollStatus::Idle
+        }
+    }
+}
+
+impl EventLoopBackend for MacEventLoop {
+    fn poll(&mut self, sink: &mut EventSink<'_>) -> PollStatus {
+        self.pump(None);
+        self.deliver(sink)
+    }
+
+    fn wait(&mut self, sink: &mut EventSink<'_>, timeout: Duration) -> PollStatus {
+        let have_pending = PENDING.with(|p| !p.borrow().is_empty());
+        self.pump(if have_pending { None } else { Some(timeout) });
+        self.deliver(sink)
+    }
+
+    fn request_exit(&self) {
+        self.exit.store(true, Ordering::Release);
+    }
+
+    fn create_window(
+        &self,
+        attrs: &WindowAttributes,
+    ) -> Result<Arc<dyn WindowBackend>, WindowError> {
+        let mtm = self.mtm;
+        let mut style = if attrs.decorations {
+            NSWindowStyleMask::Titled
+                | NSWindowStyleMask::Closable
+                | NSWindowStyleMask::Miniaturizable
+        } else {
+            NSWindowStyleMask::Borderless
+        };
+        if attrs.resizable && attrs.decorations {
+            style |= NSWindowStyleMask::Resizable;
+        }
+
+        let size = attrs.inner_size.unwrap_or(LogicalSize::new(800.0, 600.0));
+        let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(size.width, size.height));
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect,
+                style,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        // Records own the window; AppKit must not release it behind our back.
+        unsafe { window.setReleasedWhenClosed(false) };
+        window.setTitle(&NSString::from_str(&attrs.title));
+        if let Some(min) = attrs.min_size {
+            window.setMinSize(NSSize::new(min.width, min.height));
+        }
+        if let Some(max) = attrs.max_size {
+            window.setMaxSize(NSSize::new(max.width, max.height));
+        }
+        match attrs.position {
+            Some(p) => {
+                window.setFrameTopLeftPoint(NSPoint::new(p.x, screen_height(mtm) - p.y));
+            }
+            None => window.center(),
+        }
+
+        let view = window
+            .contentView()
+            .ok_or_else(|| WindowError::Os("window has no content view".into()))?;
+        let view_ptr = Retained::as_ptr(&view) as usize;
+        let id = WindowId(NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        let data = Arc::new(WindowData {
+            id,
+            state: SharedWindowState::new(WindowState {
+                size: physical_size(&window),
+                position: physical_position(&window, mtm),
+                scale_factor: window.backingScaleFactor(),
+                focused: false,
+                visible: attrs.visible,
+            }),
+            commands: Mutex::new(VecDeque::new()),
+            view: AtomicUsize::new(view_ptr),
+            destroy_requested: AtomicBool::new(false),
+        });
+
+        if attrs.visible {
+            let app = NSApplication::sharedApplication(mtm);
+            #[allow(deprecated)]
+            app.activateIgnoringOtherApps(true);
+            window.makeKeyAndOrderFront(None);
+        }
+
+        WINDOWS.with(|w| {
+            w.borrow_mut().push(Record {
+                ns_window: window,
+                data: data.clone(),
+            });
+        });
+        Ok(Arc::new(MacWindow { data }))
+    }
+}
+
+/// A macOS window handle. Dropping the last handle destroys the window on the next
+/// poll.
+pub struct MacWindow {
+    data: Arc<WindowData>,
+}
+
+impl WindowBackend for MacWindow {
+    fn id(&self) -> WindowId {
+        self.data.id
+    }
+
+    fn state(&self) -> &Arc<SharedWindowState> {
+        &self.data.state
+    }
+
+    fn raw_window_handle(&self) -> Result<RawWindowHandle, WindowError> {
+        let ptr = NonNull::new(self.data.view.load(Ordering::Acquire) as *mut c_void)
+            .ok_or(WindowError::Destroyed)?;
+        Ok(RawWindowHandle::AppKit(AppKitWindowHandle::new(ptr)))
+    }
+
+    fn raw_display_handle(&self) -> Result<RawDisplayHandle, WindowError> {
+        Ok(RawDisplayHandle::AppKit(AppKitDisplayHandle::new()))
+    }
+
+    fn send_command(&self, command: WindowCommand) {
+        self.data
+            .commands
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(command);
+    }
+}
+
+impl Drop for MacWindow {
+    fn drop(&mut self) {
+        // AppKit objects are main-thread only, so the poll loop does the teardown.
+        self.data.destroy_requested.store(true, Ordering::Release);
+    }
+}
