@@ -78,17 +78,21 @@ cargo run -p tpt-window --example event_dump
 | Target                       | Backend crate              | Status                                                                      |
 |------------------------------|----------------------------|-----------------------------------------------------------------------------|
 | Windows (x86_64, i686)       | `tpt-window-sys-win32`     | Implemented and tested. Touch and raw mouse are tested; pen and transparency are not. |
-| macOS                        | `tpt-window-sys-cocoa`     | Implemented; CI test written, not yet seen passing.                          |
-| Linux, X11                   | `tpt-window-sys-x11`       | Implemented; lifecycle test runs under Xvfb in CI.                           |
-| Linux, Wayland               | `tpt-window-sys-wayland`   | Implemented; test runs under headless weston in CI. Not tried on a real compositor. |
-| Web (`wasm32-unknown-unknown`) | `tpt-window-sys-wasm`    | Rendering checked in Edge with WebGPU; input and resize not yet checked in a browser. |
+| macOS                        | `tpt-window-sys-cocoa`     | Implemented, including close veto and cursor enter/leave. Compile-checked only; CI test not yet seen passing. |
+| Linux, X11                   | `tpt-window-sys-x11`       | Implemented, including key repeat; lifecycle test runs under Xvfb in CI.     |
+| Linux, Wayland               | `tpt-window-sys-wayland`   | Implemented, including key repeat; test runs under headless weston in CI. Not tried on a real compositor. |
+| Web (`wasm32-unknown-unknown`) | `tpt-window-sys-wasm`    | Rendering checked in Edge with WebGPU. Pointer, wheel, keyboard, text and resize checked in Chromium by the browser check. Firefox and Safari not checked. |
 | Anything else                | none                       | `new_event_loop()` returns `WindowError::Unsupported`.                       |
 
 On Linux, `new_event_loop()` uses Wayland when `WAYLAND_DISPLAY` is set and the
 Wayland connection succeeds. Otherwise it uses X11.
 
 Input IME composition (`ImeEvent::Preedit`) is implemented on Win32 only. The
-other backends deliver committed text through `ImeEvent::Commit`.
+other backends deliver committed text through `ImeEvent::Commit`. Win32 also places
+the IME candidate window with `Window::set_ime_cursor_area`; the other backends
+ignore that call.
+
+Held keys send repeated `Pressed` events on Win32, X11 and Wayland.
 
 ## Feature flags
 
@@ -105,7 +109,8 @@ This facade has no feature flags of its own. Engine-facing resource types
 | `tpt-window-gamepad`        | Optional gamepad input over `gilrs`. Not part of the windowing layer. |
 | `tpt-window-sys-*`          | Platform backends. Normally used through this facade.               |
 | `tpt-window-test-utils`     | Headless backend for tests, CI and fuzzing.                         |
-| `tpt-window-archon`         | Capability bridge to tpt-archon. Scaffold only.                     |
+| `tpt-window-archon`         | Capability bridge to tpt-archon: scope mapping, signed input events and a gated router. Works without tpt-archon. |
+| `tpt-window-bench`          | Benchmark against winit 0.30 on the same loop. Not published.       |
 
 ## Documentation
 

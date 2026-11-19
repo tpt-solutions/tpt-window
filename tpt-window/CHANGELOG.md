@@ -14,3 +14,5 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
   on Linux, and the web backend on `wasm32`. Returns `WindowError::Unsupported`
   elsewhere.
 - `hello_window` and `event_dump` examples.
+- Re-exports the core additions made since the first changelog entry:
+  `Window::set_ime_cursor_area` and the `protocol` module (version 1 wire format).
