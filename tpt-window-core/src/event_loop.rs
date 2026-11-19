@@ -2,7 +2,12 @@
 //! The caller-driven event loop.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+// The browser has no std clock; web-time reads performance.now() instead.
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use crate::backend::{EventLoopBackend, PollStatus, WindowAttributes};
 use crate::error::WindowError;

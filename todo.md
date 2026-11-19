@@ -56,7 +56,7 @@ Tracks the phased rollout from [spec.txt](spec.txt). License: MIT OR Apache-2.0,
 - [x] `YieldPoint` emitted once per frame after OS events drained
 ### Backends
 - [x] `tpt-window-test-utils`: headless backend + scripted event injection (5 tests)
-- [ ] `tpt-window-sys-wasm`: written (canvas, keyboard, mouse, wheel, touch, focus, ResizeObserver, rAF redraw); **compile- and clippy-checked only, never run in a browser**. Needs a wasm-bindgen-test / headless-browser run. No IME composition yet.
+- [ ] `tpt-window-sys-wasm`: written (canvas, keyboard, mouse, wheel, touch, focus, ResizeObserver, rAF redraw). Compile- and clippy-checked. Running it in tpt-nova (headless Edge) found two core bugs, now fixed: `std::time::Instant` panics on wasm32 (core now uses `web-time`), and `wait()` cannot block in a browser, so the caller must drive `tick` from requestAnimationFrame. Still not verified: a rendered frame. In this environment headless Edge gets a WebGPU adapter but never a device. No IME composition yet.
 - [x] `tpt-window-sys-win32`: wndproc, per-monitor-v2 DPI, keyboard, mouse, wheel, text (WM_CHAR), focus, resize/move, min/max size, cross-thread setters. Verified against a real hidden window.
 - [ ] Win32 gaps: touch/pen, `transparent`, raw input (WM_INPUT), gamepads, IME composition, 32-bit Windows (`GetWindowLongPtrW`)
 - [x] Facade `tpt-window`: `new_event_loop()` selects win32 / wasm, `Unsupported` elsewhere
@@ -72,7 +72,7 @@ Tracks the phased rollout from [spec.txt](spec.txt). License: MIT OR Apache-2.0,
 - [x] `WindowResource` and `InputEventQueue` (feature `ecs` in core; compile-checked only, no dedicated test yet)
 - [~] Replace winit in tpt-nova: **Windows done**, merged to tpt-nova local `master` (`b124d72`, not pushed; path deps to `../tpt-window`, switch to a published/git dep before pushing). Editor smoke-run opens a window and reaches its loop; not visually checked. WASM not done (nova has no WASM build yet). Known behaviour changes: shortcuts follow physical QWERTY positions; text comes from IME commits.
 - [x] AI-agent yield point: the caller loop gets a `YieldPoint` once per step (`tpt-window-core`). Nova's loop ignores it for rendering; the display-sync test is still open.
-- [ ] Test that display refresh stays in sync with the AI-agent yield point
+- [x] Yield-point contract tested headless (`tpt-window-test-utils/tests/yield_sync.rs`): one yield per poll, last in its batch, numbered in order, lost yields counted in `dropped()` and visible as a frame-number gap. Not yet tested against real display refresh (vsync), which needs the nova or tpt-visual path.
 - [x] tpt-visual: wgpu surface from raw handles; `Resized` reconfigures; frames render from the loop (not `RedrawRequested`). Done in `simple_player`, merged to tpt-visual local `master` (`b0af009`, not pushed). Runs for 12 s on a BGRA surface with no errors. The compositor's BGRA bug and the MSRV bump to 1.87 are fixed in that commit.
 - [ ] **Exit:** tpt-nova demo runs on tpt-window
 
