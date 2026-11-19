@@ -11,6 +11,9 @@ Engine-first windowing, input and surface management for the TPT AV Stack
 
 **Status:** pre-0.1 scaffold. See [spec.txt](spec.txt) and [todo.md](todo.md).
 
+Coming from winit 0.30? See [MIGRATION.md](MIGRATION.md) for the event and window mapping,
+and the gaps.
+
 ## License
 
 Licensed under either of
