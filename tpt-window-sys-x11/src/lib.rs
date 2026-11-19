@@ -5,12 +5,13 @@
 //! connection is not exposed by the pure-Rust `x11rb` client.
 //!
 //! Design notes:
-//! - All Xlib calls happen on the thread that created the [`EventLoop`]. Handles
+//! - All Xlib calls happen on the thread that created the `EventLoop`. Handles
 //!   on other threads only queue commands, applied on the next poll.
 //! - Scale factor comes from the `Xft.dpi` resource (96 dpi = 1.0). It is read once
 //!   when the loop opens, so a later change is not picked up.
-//! - Auto-repeat arrives as release/press pairs unless detectable auto-repeat is
-//!   enabled. Key repeat is not generated.
+//! - Key repeat: detectable auto-repeat is enabled when the loop opens, so a held key
+//!   sends repeated `Pressed` events (text included) and no release until it is let
+//!   go, as on Win32. Servers without it fall back to release/press pairs.
 //! - Window closing is requested through `WM_DELETE_WINDOW`, so the application can
 //!   veto it. A close the application accepts destroys the window.
 //! - X11 errors are ignored by a no-op error handler instead of exiting the process.
@@ -104,6 +105,14 @@ pub fn new_event_loop() -> Result<EventLoop, WindowError> {
     // Force the thread-local ring to allocate now, not on the hot path.
     // SAFETY: the display is open.
     let scale = unsafe { dpi_scale(&xlib, display) };
+    // Detectable auto-repeat: a held key arrives as repeated presses with no
+    // synthetic release in between, matching Win32. Without it X sends
+    // release/press pairs for every repeat. Servers that cannot do it keep the pairs.
+    // SAFETY: the display is open; `supported` is a valid out-pointer.
+    unsafe {
+        let mut supported: xlib::Bool = xlib::False;
+        (xlib.XkbSetDetectableAutoRepeat)(display, xlib::True, &mut supported);
+    }
     Ok(EventLoop::with_backend(Box::new(X11EventLoop {
         xlib,
         display,
