@@ -28,7 +28,8 @@ pub use tpt_window_core::*;
 /// The spec writes this as `EventLoop::new()`; an inherent constructor cannot live in
 /// the facade because `EventLoop` is defined in `tpt-window-core`.
 ///
-/// Platforms without a backend yet (Linux; see todo.md Phase 3) return
+/// Platforms without a backend yet (Linux without Wayland, X11 not written yet; see
+/// todo.md Phase 3) return
 /// [`WindowError::Unsupported`].
 pub fn new_event_loop() -> Result<EventLoop, WindowError> {
     #[cfg(windows)]
@@ -39,11 +40,20 @@ pub fn new_event_loop() -> Result<EventLoop, WindowError> {
     {
         tpt_window_sys_cocoa::new_event_loop()
     }
+    #[cfg(target_os = "linux")]
+    {
+        tpt_window_sys_wayland::new_event_loop()
+    }
     #[cfg(target_arch = "wasm32")]
     {
         tpt_window_sys_wasm::new_event_loop()
     }
-    #[cfg(not(any(windows, target_os = "macos", target_arch = "wasm32")))]
+    #[cfg(not(any(
+        windows,
+        target_os = "macos",
+        target_os = "linux",
+        target_arch = "wasm32"
+    )))]
     {
         Err(WindowError::Unsupported("no backend for this platform yet"))
     }

@@ -12,12 +12,34 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Linux system libraries (xkbcommon for the Wayland backend)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  # The Wayland lifecycle test needs a compositor, so start a headless weston.
+  wayland:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install weston and xkbcommon
+        run: sudo apt-get update && sudo apt-get install -y weston libxkbcommon-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Start headless compositor
+        run: |
+          export XDG_RUNTIME_DIR=$RUNNER_TEMP/xdg
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+          weston --backend=headless --socket=wayland-test --idle-time=0 &
+          for i in $(seq 1 50); do [ -S "$XDG_RUNTIME_DIR/wayland-test" ] && break; sleep 0.2; done
+          test -S "$XDG_RUNTIME_DIR/wayland-test"
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "WAYLAND_DISPLAY=wayland-test" >> "$GITHUB_ENV"
+      - run: cargo test -p tpt-window-sys-wayland -- --nocapture
 
   wasm:
     runs-on: ubuntu-latest

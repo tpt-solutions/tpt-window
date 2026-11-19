@@ -77,12 +77,12 @@ Tracks the phased rollout from [spec.txt](spec.txt). License: MIT OR Apache-2.0,
 - [ ] **Exit:** tpt-nova demo runs on tpt-window
 
 ## Phase 3: Hard Platforms (Weeks 5–8)
-- [ ] `tpt-window-sys-cocoa`: macOS, then iOS
+- [~] `tpt-window-sys-cocoa`: written (AppKit via objc2: window, commands, NSEvent input, state diffs). Compile- and clippy-checked for macOS; the test in `tests/real_window.rs` runs on the macOS CI runner, not yet seen passing. Gaps: no window delegate (close cannot be vetoed), no cursor enter/leave tracking area.
 - [ ] `tpt-window-sys-x11` (x11rb)
-- [ ] `tpt-window-sys-wayland` (sctk, stable xdg-shell; verify version first)
+- [~] `tpt-window-sys-wayland`: written (sctk 0.19: xdg toplevel, seat keyboard/pointer, configure, close request). Compile- and clippy-checked for Linux; the lifecycle test runs in a CI job with headless weston, not yet seen passing. Gaps: SetSize/SetPosition/SetVisible cannot be expressed in Wayland, no key repeat, no IME composition. Not yet tested with a real compositor.
 - [ ] IME implementation (all platforms)
 - [ ] DPI / Retina / fractional scaling across all platforms
-- [ ] Verify wayland-client/sctk licences pass cargo-deny
+- [x] Verify wayland-client/sctk licences pass cargo-deny (checked locally; CI runs cargo-deny too)
 - [ ] **Exit:** same example runs on all platforms
 
 ## Phase 4: Capability & Compositor (Weeks 9–12)

@@ -1,2 +1,862 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! tpt-window-sys-wayland (scaffold; see todo.md).
+//! Wayland backend for tpt-window, built on `smithay-client-toolkit` (sctk).
+//!
+//! Design notes:
+//! - Wayland does not let clients choose their own size or position, and it has no
+//!   way to hide a toplevel. `SetSize`, `SetPosition` and `SetVisible` are therefore
+//!   ignored. The compositor's configure events drive `Resized`.
+//! - Close requests are reported as `CloseRequested`. The application decides
+//!   whether to drop its window, so it can veto a close.
+//! - Keyboard input uses the xkb keymap through sctk, so text input comes from
+//!   `ImeEvent::Commit`. Key repeat is not generated yet (see todo.md).
+//! - The client library is loaded at runtime (`dlopen`), so building does not
+//!   need the Wayland development packages.
+#![cfg(target_os = "linux")]
+#![warn(missing_docs)]
+
+use std::collections::VecDeque;
+use std::ffi::c_void;
+use std::num::NonZeroU32;
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use raw_window_handle::{
+    RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
+};
+use sctk::compositor::{CompositorHandler, CompositorState};
+use sctk::output::{OutputHandler, OutputState};
+use sctk::reexports::calloop::EventLoop as CalloopLoop;
+use sctk::reexports::calloop_wayland_source::WaylandSource;
+use sctk::reexports::client::globals::registry_queue_init;
+use sctk::reexports::client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface};
+use sctk::reexports::client::{Connection, Proxy, QueueHandle};
+use sctk::registry::{ProvidesRegistryState, RegistryState};
+use sctk::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers};
+use sctk::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
+use sctk::seat::{Capability, SeatHandler, SeatState};
+use sctk::shell::WaylandSurface;
+use sctk::shell::xdg::XdgShell;
+use sctk::shell::xdg::window::{Window, WindowConfigure, WindowDecorations, WindowHandler};
+use sctk::{
+    delegate_compositor, delegate_keyboard, delegate_output, delegate_pointer, delegate_registry,
+    delegate_seat, delegate_xdg_shell, delegate_xdg_window, registry_handlers,
+};
+use tpt_window_core::*;
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+// ---------------------------------------------------------------------------
+// Keyboard mapping (evdev codes, which name physical key positions)
+// ---------------------------------------------------------------------------
+
+/// Maps an evdev key code (`KEY_*`) to a [`KeyCode`]. Codes name physical positions,
+/// so the result does not depend on the keyboard layout.
+fn key_from_evdev(code: u32) -> KeyCode {
+    match code {
+        1 => KeyCode::Escape,
+        2 => KeyCode::Digit1,
+        3 => KeyCode::Digit2,
+        4 => KeyCode::Digit3,
+        5 => KeyCode::Digit4,
+        6 => KeyCode::Digit5,
+        7 => KeyCode::Digit6,
+        8 => KeyCode::Digit7,
+        9 => KeyCode::Digit8,
+        10 => KeyCode::Digit9,
+        11 => KeyCode::Digit0,
+        12 => KeyCode::Minus,
+        13 => KeyCode::Equal,
+        14 => KeyCode::Backspace,
+        15 => KeyCode::Tab,
+        16 => KeyCode::Q,
+        17 => KeyCode::W,
+        18 => KeyCode::E,
+        19 => KeyCode::R,
+        20 => KeyCode::T,
+        21 => KeyCode::Y,
+        22 => KeyCode::U,
+        23 => KeyCode::I,
+        24 => KeyCode::O,
+        25 => KeyCode::P,
+        26 => KeyCode::BracketLeft,
+        27 => KeyCode::BracketRight,
+        28 => KeyCode::Enter,
+        29 => KeyCode::ControlLeft,
+        30 => KeyCode::A,
+        31 => KeyCode::S,
+        32 => KeyCode::D,
+        33 => KeyCode::F,
+        34 => KeyCode::G,
+        35 => KeyCode::H,
+        36 => KeyCode::J,
+        37 => KeyCode::K,
+        38 => KeyCode::L,
+        39 => KeyCode::Semicolon,
+        40 => KeyCode::Quote,
+        41 => KeyCode::Backquote,
+        42 => KeyCode::ShiftLeft,
+        43 => KeyCode::Backslash,
+        44 => KeyCode::Z,
+        45 => KeyCode::X,
+        46 => KeyCode::C,
+        47 => KeyCode::V,
+        48 => KeyCode::B,
+        49 => KeyCode::N,
+        50 => KeyCode::M,
+        51 => KeyCode::Comma,
+        52 => KeyCode::Period,
+        53 => KeyCode::Slash,
+        54 => KeyCode::ShiftRight,
+        55 => KeyCode::NumpadMultiply,
+        56 => KeyCode::AltLeft,
+        57 => KeyCode::Space,
+        58 => KeyCode::CapsLock,
+        59 => KeyCode::F1,
+        60 => KeyCode::F2,
+        61 => KeyCode::F3,
+        62 => KeyCode::F4,
+        63 => KeyCode::F5,
+        64 => KeyCode::F6,
+        65 => KeyCode::F7,
+        66 => KeyCode::F8,
+        67 => KeyCode::F9,
+        68 => KeyCode::F10,
+        71 => KeyCode::Numpad7,
+        72 => KeyCode::Numpad8,
+        73 => KeyCode::Numpad9,
+        74 => KeyCode::NumpadSubtract,
+        75 => KeyCode::Numpad4,
+        76 => KeyCode::Numpad5,
+        77 => KeyCode::Numpad6,
+        78 => KeyCode::NumpadAdd,
+        79 => KeyCode::Numpad1,
+        80 => KeyCode::Numpad2,
+        81 => KeyCode::Numpad3,
+        82 => KeyCode::Numpad0,
+        83 => KeyCode::NumpadDecimal,
+        87 => KeyCode::F11,
+        88 => KeyCode::F12,
+        96 => KeyCode::NumpadEnter,
+        97 => KeyCode::ControlRight,
+        98 => KeyCode::NumpadDivide,
+        100 => KeyCode::AltRight,
+        102 => KeyCode::Home,
+        103 => KeyCode::ArrowUp,
+        104 => KeyCode::PageUp,
+        105 => KeyCode::ArrowLeft,
+        106 => KeyCode::ArrowRight,
+        107 => KeyCode::End,
+        108 => KeyCode::ArrowDown,
+        109 => KeyCode::PageDown,
+        110 => KeyCode::Insert,
+        111 => KeyCode::Delete,
+        125 => KeyCode::SuperLeft,
+        126 => KeyCode::SuperRight,
+        _ => KeyCode::Unidentified,
+    }
+}
+
+/// Converts an xkb keycode (evdev + 8, as sctk reports it) to a [`KeyCode`].
+fn key_from_xkb(raw_code: u32) -> KeyCode {
+    key_from_evdev(raw_code.saturating_sub(8))
+}
+
+fn mouse_button(code: u32) -> MouseButton {
+    match code {
+        0x110 => MouseButton::Left,
+        0x111 => MouseButton::Right,
+        0x112 => MouseButton::Middle,
+        0x113 => MouseButton::Back,
+        0x114 => MouseButton::Forward,
+        other => MouseButton::Other((other & 0xFFFF) as u16),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-window data
+// ---------------------------------------------------------------------------
+
+/// State shared between the event-loop record and the `Window` handle (both may run
+/// on different threads, so it is `Send + Sync`).
+struct WindowData {
+    id: WindowId,
+    state: Arc<SharedWindowState>,
+    commands: Mutex<VecDeque<WindowCommand>>,
+    /// Address of the `wl_surface` and of the `wl_display`, for raw handles.
+    surface: AtomicUsize,
+    display: usize,
+    destroy_requested: AtomicBool,
+}
+
+/// Event-loop side of a window: the sctk window and bookkeeping.
+struct Record {
+    window: Window,
+    data: Arc<WindowData>,
+    /// Scale factor reported by the compositor (integer).
+    scale: i32,
+    /// Last physical size reported to the application.
+    size: PhysicalSize<u32>,
+}
+
+// ---------------------------------------------------------------------------
+// Event-loop state (owned by the loop, touched only on its thread)
+// ---------------------------------------------------------------------------
+
+/// Everything the sctk handlers need. Handlers push tpt-window events into
+/// `pending`, which the poll loop then delivers to the caller's sink.
+pub struct WaylandState {
+    registry_state: RegistryState,
+    seat_state: SeatState,
+    output_state: OutputState,
+    compositor_state: CompositorState,
+    xdg_shell: XdgShell,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
+    pointer: Option<wl_pointer::WlPointer>,
+    windows: Vec<Record>,
+    /// Window that has keyboard focus.
+    keyboard_focus: Option<WindowId>,
+    /// Window the pointer is over, with its last logical pointer position.
+    pointer_over: Option<(WindowId, f64, f64)>,
+    pending: VecDeque<Event>,
+}
+
+impl WaylandState {
+    fn push(&mut self, window: WindowId, event: WindowEvent) {
+        self.pending.push_back(Event { window, event });
+    }
+
+    fn record_for_surface(&self, surface: &wl_surface::WlSurface) -> Option<usize> {
+        self.windows
+            .iter()
+            .position(|r| r.window.wl_surface() == surface)
+    }
+
+    fn physical(scale: i32, logical: (u32, u32)) -> PhysicalSize<u32> {
+        PhysicalSize::new(logical.0 * scale as u32, logical.1 * scale as u32)
+    }
+}
+
+impl CompositorHandler for WaylandState {
+    fn scale_factor_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+        new_factor: i32,
+    ) {
+        let Some(i) = self.record_for_surface(surface) else {
+            return;
+        };
+        let rec = &mut self.windows[i];
+        rec.scale = new_factor;
+        let size = rec.size;
+        let id = rec.data.id;
+        rec.data
+            .state
+            .update(|s| s.scale_factor = f64::from(new_factor));
+        self.push(
+            id,
+            WindowEvent::ScaleFactorChanged {
+                scale_factor: f64::from(new_factor),
+                new_inner_size: size,
+            },
+        );
+    }
+
+    fn transform_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _new_transform: wl_output::Transform,
+    ) {
+    }
+
+    fn frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _time: u32,
+    ) {
+    }
+
+    fn surface_enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _output: &wl_output::WlOutput,
+    ) {
+    }
+
+    fn surface_leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _output: &wl_output::WlOutput,
+    ) {
+    }
+}
+
+impl OutputHandler for WaylandState {
+    fn output_state(&mut self) -> &mut OutputState {
+        &mut self.output_state
+    }
+
+    fn new_output(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _output: wl_output::WlOutput,
+    ) {
+    }
+
+    fn update_output(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _output: wl_output::WlOutput,
+    ) {
+    }
+
+    fn output_destroyed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _output: wl_output::WlOutput,
+    ) {
+    }
+}
+
+impl SeatHandler for WaylandState {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat_state
+    }
+
+    fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {}
+
+    fn new_capability(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        match capability {
+            Capability::Keyboard if self.keyboard.is_none() => {
+                if let Ok(kb) = self.seat_state.get_keyboard(qh, &seat, None) {
+                    self.keyboard = Some(kb);
+                }
+            }
+            Capability::Pointer if self.pointer.is_none() => {
+                if let Ok(p) = self.seat_state.get_pointer(qh, &seat) {
+                    self.pointer = Some(p);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn remove_capability(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _seat: wl_seat::WlSeat,
+        _capability: Capability,
+    ) {
+    }
+
+    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {
+    }
+}
+
+impl KeyboardHandler for WaylandState {
+    fn enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        surface: &wl_surface::WlSurface,
+        _serial: u32,
+        _raw: &[u32],
+        _keysyms: &[Keysym],
+    ) {
+        if let Some(i) = self.record_for_surface(surface) {
+            let id = self.windows[i].data.id;
+            self.keyboard_focus = Some(id);
+            self.windows[i].data.state.update(|s| s.focused = true);
+            self.push(id, WindowEvent::Focused(true));
+        }
+    }
+
+    fn leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        surface: &wl_surface::WlSurface,
+        _serial: u32,
+    ) {
+        if let Some(i) = self.record_for_surface(surface) {
+            let id = self.windows[i].data.id;
+            self.keyboard_focus = None;
+            self.windows[i].data.state.update(|s| s.focused = false);
+            self.push(id, WindowEvent::Focused(false));
+        }
+    }
+
+    fn press_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        event: KeyEvent,
+    ) {
+        let Some(id) = self.keyboard_focus else {
+            return;
+        };
+        let code = key_from_xkb(event.raw_code);
+        self.push(
+            id,
+            WindowEvent::KeyboardInput {
+                state: ElementState::Pressed,
+                key_code: code,
+                physical_key: PhysicalKey::Code(code),
+            },
+        );
+        if let Some(text) = event.utf8 {
+            if text.chars().all(|c| !c.is_control()) {
+                let mut rest: &str = &text;
+                while !rest.is_empty() {
+                    let (chunk, next) = ImeText::take_chunk(rest);
+                    let continued = !next.is_empty();
+                    self.push(
+                        id,
+                        WindowEvent::Ime(ImeEvent::Commit {
+                            text: chunk,
+                            continued,
+                        }),
+                    );
+                    rest = next;
+                }
+            }
+        }
+    }
+
+    fn release_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        event: KeyEvent,
+    ) {
+        let Some(id) = self.keyboard_focus else {
+            return;
+        };
+        let code = key_from_xkb(event.raw_code);
+        self.push(
+            id,
+            WindowEvent::KeyboardInput {
+                state: ElementState::Released,
+                key_code: code,
+                physical_key: PhysicalKey::Code(code),
+            },
+        );
+    }
+
+    fn update_modifiers(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        _modifiers: Modifiers,
+        _layout: u32,
+    ) {
+        // Modifier keys arrive as key events, so the state is tracked by the caller.
+    }
+}
+
+impl PointerHandler for WaylandState {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        for ev in events {
+            let Some(i) = self.record_for_surface(&ev.surface) else {
+                continue;
+            };
+            let id = self.windows[i].data.id;
+            let scale = f64::from(self.windows[i].scale);
+            let (x, y) = ev.position;
+            match ev.kind {
+                PointerEventKind::Enter { .. } => {
+                    self.pointer_over = Some((id, x, y));
+                    self.push(
+                        id,
+                        WindowEvent::CursorMoved {
+                            position: PhysicalPosition::new(x * scale, y * scale),
+                            pressure: 0.0,
+                        },
+                    );
+                }
+                PointerEventKind::Leave { .. } => {
+                    self.pointer_over = None;
+                    self.push(id, WindowEvent::CursorLeft);
+                }
+                PointerEventKind::Motion { .. } => {
+                    self.pointer_over = Some((id, x, y));
+                    self.push(
+                        id,
+                        WindowEvent::CursorMoved {
+                            position: PhysicalPosition::new(x * scale, y * scale),
+                            pressure: 0.0,
+                        },
+                    );
+                }
+                PointerEventKind::Press { button, .. } => {
+                    self.push(
+                        id,
+                        WindowEvent::MouseInput {
+                            state: ElementState::Pressed,
+                            button: mouse_button(button),
+                        },
+                    );
+                }
+                PointerEventKind::Release { button, .. } => {
+                    self.push(
+                        id,
+                        WindowEvent::MouseInput {
+                            state: ElementState::Released,
+                            button: mouse_button(button),
+                        },
+                    );
+                }
+                PointerEventKind::Axis {
+                    horizontal,
+                    vertical,
+                    ..
+                } => {
+                    // Wayland reports scrolling away from the user as positive; tpt-window
+                    // reports wheel-up as positive, so the sign is flipped.
+                    let delta = if vertical.discrete != 0 || horizontal.discrete != 0 {
+                        MouseScrollDelta::LineDelta {
+                            x: -(horizontal.discrete as f32),
+                            y: -(vertical.discrete as f32),
+                        }
+                    } else {
+                        MouseScrollDelta::PixelDelta {
+                            x: -horizontal.absolute * scale,
+                            y: -vertical.absolute * scale,
+                        }
+                    };
+                    self.push(
+                        id,
+                        WindowEvent::MouseWheel {
+                            delta,
+                            phase: TouchPhase::Moved,
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+
+impl WindowHandler for WaylandState {
+    fn request_close(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, window: &Window) {
+        if let Some(i) = self
+            .windows
+            .iter()
+            .position(|r| r.window.wl_surface() == window.wl_surface())
+        {
+            let id = self.windows[i].data.id;
+            self.push(id, WindowEvent::CloseRequested);
+        }
+    }
+
+    fn configure(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        window: &Window,
+        configure: WindowConfigure,
+        _serial: u32,
+    ) {
+        let Some(i) = self
+            .windows
+            .iter()
+            .position(|r| r.window.wl_surface() == window.wl_surface())
+        else {
+            return;
+        };
+        let (w, h) = configure.new_size;
+        let (cur_w, cur_h) = {
+            let rec = &self.windows[i];
+            (rec.size.width, rec.size.height)
+        };
+        let logical = (
+            w.map_or(cur_w / self.windows[i].scale as u32, NonZeroU32::get),
+            h.map_or(cur_h / self.windows[i].scale as u32, NonZeroU32::get),
+        );
+        let physical = WaylandState::physical(self.windows[i].scale, logical);
+        if physical != self.windows[i].size {
+            let id = self.windows[i].data.id;
+            self.windows[i].size = physical;
+            self.windows[i].data.state.update(|s| s.size = physical);
+            self.push(id, WindowEvent::Resized(physical));
+        }
+    }
+}
+
+impl ProvidesRegistryState for WaylandState {
+    fn registry(&mut self) -> &mut RegistryState {
+        &mut self.registry_state
+    }
+    registry_handlers![OutputState, SeatState];
+}
+
+delegate_compositor!(WaylandState);
+delegate_output!(WaylandState);
+delegate_seat!(WaylandState);
+delegate_keyboard!(WaylandState);
+delegate_pointer!(WaylandState);
+delegate_xdg_shell!(WaylandState);
+delegate_xdg_window!(WaylandState);
+delegate_registry!(WaylandState);
+
+// ---------------------------------------------------------------------------
+// Backend
+// ---------------------------------------------------------------------------
+
+/// The Wayland event loop.
+pub struct WaylandEventLoop {
+    calloop: CalloopLoop<'static, WaylandState>,
+    state: std::cell::RefCell<WaylandState>,
+    conn: Connection,
+    qh: QueueHandle<WaylandState>,
+    exit: Arc<AtomicBool>,
+}
+
+/// Creates an [`EventLoop`] backed by Wayland. Fails when no compositor is reachable
+/// (no `WAYLAND_DISPLAY`).
+pub fn new_event_loop() -> Result<EventLoop, WindowError> {
+    let conn = Connection::connect_to_env()
+        .map_err(|e| WindowError::Os(format!("cannot connect to Wayland: {e}")))?;
+    let (globals, event_queue) =
+        registry_queue_init::<WaylandState>(&conn).map_err(|e| WindowError::Os(e.to_string()))?;
+    let qh = event_queue.handle();
+    let registry_state = RegistryState::new(&globals);
+    let compositor_state = CompositorState::bind(&globals, &qh)
+        .map_err(|e| WindowError::Os(format!("wl_compositor: {e}")))?;
+    let xdg_shell =
+        XdgShell::bind(&globals, &qh).map_err(|e| WindowError::Os(format!("xdg_wm_base: {e}")))?;
+    let state = WaylandState {
+        registry_state,
+        seat_state: SeatState::new(&globals, &qh),
+        output_state: OutputState::new(&globals, &qh),
+        compositor_state,
+        xdg_shell,
+        keyboard: None,
+        pointer: None,
+        windows: Vec::new(),
+        keyboard_focus: None,
+        pointer_over: None,
+        pending: VecDeque::with_capacity(4096),
+    };
+    let calloop: CalloopLoop<'static, WaylandState> =
+        CalloopLoop::try_new().map_err(|e| WindowError::Os(e.to_string()))?;
+    WaylandSource::new(conn.clone(), event_queue)
+        .insert(calloop.handle())
+        .map_err(|e| WindowError::Os(e.to_string()))?;
+    Ok(EventLoop::with_backend(Box::new(WaylandEventLoop {
+        calloop,
+        state: std::cell::RefCell::new(state),
+        conn,
+        qh,
+        exit: Arc::new(AtomicBool::new(false)),
+    })))
+}
+
+impl WaylandEventLoop {
+    /// Dispatches pending Wayland events, blocking up to `timeout` if none are queued.
+    fn dispatch(&mut self, timeout: Option<Duration>) {
+        let mut state = self.state.borrow_mut();
+        let _ = self
+            .calloop
+            .dispatch(timeout.or(Some(Duration::ZERO)), &mut state);
+        // Commands from handles, then removal of windows whose last handle dropped.
+        for rec in state.windows.iter() {
+            let cmds: Vec<WindowCommand> = {
+                let mut q = rec.data.commands.lock().unwrap_or_else(|e| e.into_inner());
+                q.drain(..).collect()
+            };
+            for cmd in cmds {
+                if let WindowCommand::SetTitle(t) = cmd {
+                    rec.window.set_title(t);
+                }
+                // SetSize, SetPosition, SetVisible and RequestRedraw are not
+                // expressible in Wayland; see the crate notes.
+            }
+        }
+        let mut i = 0;
+        while i < state.windows.len() {
+            if state.windows[i]
+                .data
+                .destroy_requested
+                .load(Ordering::Acquire)
+            {
+                let rec = state.windows.swap_remove(i);
+                rec.data.surface.store(0, Ordering::Release);
+                let id = rec.data.id;
+                state.push(id, WindowEvent::Destroyed);
+                // Dropping `rec` releases the xdg toplevel and surface.
+            } else {
+                i += 1;
+            }
+        }
+        let _ = self.conn.flush();
+    }
+
+    /// Moves queued events into the caller's sink.
+    fn deliver(&self, sink: &mut EventSink<'_>) -> PollStatus {
+        let mut state = self.state.borrow_mut();
+        let mut delivered = false;
+        while let Some(ev) = state.pending.front().copied() {
+            match sink.push(ev) {
+                EventStatus::Accepted => {
+                    state.pending.pop_front();
+                    delivered = true;
+                }
+                EventStatus::BufferFull | EventStatus::Captured => break,
+            }
+        }
+        if self.exit.load(Ordering::Acquire) {
+            PollStatus::Exit
+        } else if delivered {
+            PollStatus::Events
+        } else {
+            PollStatus::Idle
+        }
+    }
+}
+
+impl EventLoopBackend for WaylandEventLoop {
+    fn poll(&mut self, sink: &mut EventSink<'_>) -> PollStatus {
+        self.dispatch(None);
+        self.deliver(sink)
+    }
+
+    fn wait(&mut self, sink: &mut EventSink<'_>, timeout: Duration) -> PollStatus {
+        let have_pending = !self.state.borrow().pending.is_empty();
+        self.dispatch(if have_pending { None } else { Some(timeout) });
+        self.deliver(sink)
+    }
+
+    fn request_exit(&self) {
+        self.exit.store(true, Ordering::Release);
+    }
+
+    fn create_window(
+        &self,
+        attrs: &WindowAttributes,
+    ) -> Result<Arc<dyn WindowBackend>, WindowError> {
+        let mut state = self.state.borrow_mut();
+        let surface = state.compositor_state.create_surface(&self.qh);
+        let surface_ptr = surface.id().as_ptr() as usize;
+        let decorations = if attrs.decorations {
+            WindowDecorations::RequestServer
+        } else {
+            WindowDecorations::ClientOnly
+        };
+        let window = state
+            .xdg_shell
+            .create_window(surface, decorations, &self.qh);
+        window.set_title(attrs.title.clone());
+        window.set_app_id("tpt-window");
+        if let Some(min) = attrs.min_size {
+            window.set_min_size(Some((min.width as u32, min.height as u32)));
+        }
+        if let Some(max) = attrs.max_size {
+            window.set_max_size(Some((max.width as u32, max.height as u32)));
+        }
+        // The first commit without a buffer asks the compositor for a configure.
+        window.commit();
+
+        let inner = attrs.inner_size.unwrap_or(LogicalSize::new(800.0, 600.0));
+        let size = PhysicalSize::new(inner.width as u32, inner.height as u32);
+        let id = WindowId(NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        let display = self.conn.backend().display_ptr() as usize;
+        let data = Arc::new(WindowData {
+            id,
+            state: SharedWindowState::new(WindowState {
+                size,
+                position: PhysicalPosition::new(0, 0),
+                scale_factor: 1.0,
+                focused: false,
+                visible: attrs.visible,
+            }),
+            commands: Mutex::new(VecDeque::new()),
+            surface: AtomicUsize::new(surface_ptr),
+            display,
+            destroy_requested: AtomicBool::new(false),
+        });
+        state.windows.push(Record {
+            window,
+            data: data.clone(),
+            scale: 1,
+            size,
+        });
+        Ok(Arc::new(WaylandWindow { data }))
+    }
+}
+
+/// A Wayland toplevel handle. Dropping the last handle destroys the window on the
+/// next poll.
+pub struct WaylandWindow {
+    data: Arc<WindowData>,
+}
+
+impl WindowBackend for WaylandWindow {
+    fn id(&self) -> WindowId {
+        self.data.id
+    }
+
+    fn state(&self) -> &Arc<SharedWindowState> {
+        &self.data.state
+    }
+
+    fn raw_window_handle(&self) -> Result<RawWindowHandle, WindowError> {
+        let ptr = NonNull::new(self.data.surface.load(Ordering::Acquire) as *mut c_void)
+            .ok_or(WindowError::Destroyed)?;
+        Ok(RawWindowHandle::Wayland(WaylandWindowHandle::new(ptr)))
+    }
+
+    fn raw_display_handle(&self) -> Result<RawDisplayHandle, WindowError> {
+        let ptr = NonNull::new(self.data.display as *mut c_void).ok_or(WindowError::Destroyed)?;
+        Ok(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(ptr)))
+    }
+
+    fn send_command(&self, command: WindowCommand) {
+        self.data
+            .commands
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(command);
+    }
+}
+
+impl Drop for WaylandWindow {
+    fn drop(&mut self) {
+        self.data.destroy_requested.store(true, Ordering::Release);
+    }
+}

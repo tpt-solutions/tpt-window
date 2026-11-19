@@ -9,4 +9,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+raw-window-handle = "0.6"
 tpt-window-core = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+sctk = { package = "smithay-client-toolkit", version = "0.19", default-features = false, features = ["calloop", "xkbcommon"] }
+wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
