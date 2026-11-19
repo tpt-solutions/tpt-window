@@ -27,7 +27,15 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - `ecs` feature: `WindowResource` and `InputEventQueue` for ECS engines.
 - Property tests for the event queue and an allocation-counting test of the event
   hot path.
+- `protocol` module: version 1 of the display-server wire format (`Message`, `encode`,
+  and a decoder that checks the length against `MAX_FRAME_LEN` before it allocates),
+  with `negotiate` for the version handshake. It has no transport.
+- `Window::set_ime_cursor_area` and `WindowCommand::SetImeCursorArea`, which place the
+  IME composition and candidate windows. Applied on Win32; other backends ignore it.
 
 ### Changed
 - Uses `web-time` on `wasm32`, because `std::time::Instant` panics in browsers.
 - Yield-point contract is tested: one yield per poll, numbered in order.
+- `PROTOCOL_VERSION` is 1. It was 0 while the protocol was a skeleton.
+- Public `KeyCode` variants and the DPI pair fields are documented. The crate passes
+  `missing_docs` without suppression.

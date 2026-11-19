@@ -14,7 +14,7 @@ engine integration that must not pull in a platform backend.
 |-----------------|---------------------------------------------------------------------------------|
 | `event`         | `Event`, `WindowEvent`. All events are `Copy`.                                  |
 | `event_loop`    | `EventLoop`, the per-thread pump, and the `YieldPoint` emitted once per step.   |
-| `window`        | `Window` (cached state plus queued setters) and `WindowBuilder`.                |
+| `window`        | `Window` (cached state plus queued setters, including `set_ime_cursor_area`) and `WindowBuilder`. |
 | `backend`       | `EventLoopBackend` and `WindowBackend` traits, `WindowAttributes`, `PollStatus`. |
 | `sink`          | `EventQueue` (caller-owned storage) and `EventSink` (the write side).           |
 | `ring`          | `RingBuffer` and `OverflowPolicy`. `DEFAULT_CAPACITY` is the default size.      |
@@ -22,7 +22,7 @@ engine integration that must not pull in a platform backend.
 | `text`          | `ImeEvent` (`Preedit`, `Commit`), plus fixed-size inline text buffers.          |
 | `dpi`           | `PhysicalSize`, `LogicalSize`, `PhysicalPosition`, `LogicalPosition`.           |
 | `security`      | `CapabilityToken`, `WindowScope`, `InputScope`, `DisplayScope`, `SurfaceHandle`. |
-| `protocol`      | Wire-level types for the display-server protocol (in progress).                 |
+| `protocol`      | Version 1 wire format for the display-server protocol: `Message`, `encode`, a length-checked decoder, and `negotiate`. It has no transport. |
 | `ids`           | `WindowId`.                                                                     |
 | `error`         | `WindowError`.                                                                  |
 | `ecs` (feature) | `WindowResource` and `InputEventQueue` for ECS engines.                         |
@@ -79,8 +79,9 @@ wgpu create a surface.
   panics in the browser.
 - The crate uses `#![forbid(unsafe_code)]`. All `unsafe` FFI lives in the
   backends.
-- `#![warn(missing_docs)]` is enabled. Rustdoc coverage for every public item is
-  still in progress (see [todo.md](../todo.md), Phase 5).
+- `#![warn(missing_docs)]` is enabled, and the crate passes it with no suppressions.
+- The display protocol decodes frames without allocating from the declared length, so
+  a peer cannot make the decoder reserve memory by sending a large length.
 
 ## Testing
 
