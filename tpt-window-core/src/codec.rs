@@ -750,7 +750,15 @@ fn read_event(r: &mut Reader<'_>) -> Result<WindowEvent, CodecError> {
             frame_number: r.u64()?,
             timestamp_ns: r.u64()?,
         },
-        64 => WindowEvent::ModifiersChanged(ModifiersState::from_bits(r.u8()?)),
+        64 => {
+            // Only the four modifier bits exist. Any other bit is not something this encoder
+            // wrote, and accepting it would make re-encoding change the bytes.
+            let bits = r.u8()?;
+            if bits & !0x0F != 0 {
+                return Err(CodecError::BadValue);
+            }
+            WindowEvent::ModifiersChanged(ModifiersState::from_bits(bits))
+        }
         65 => WindowEvent::ThemeChanged(match r.u8()? {
             0 => Theme::Light,
             1 => Theme::Dark,
@@ -781,6 +789,26 @@ mod tests {
             assert_eq!(key_tag(key), tag);
         }
         assert_eq!(key_from_tag(KEYS_BY_TAG.len() as u32), None);
+    }
+
+    #[test]
+    fn modifier_bits_outside_the_four_flags_are_rejected() {
+        // Found by fuzzing: 69 used to decode to modifiers 5, and re-encoding gave different bytes.
+        assert_eq!(decode_event(&[64, 69]), Err(CodecError::BadValue));
+        assert_eq!(decode_event(&[64, 0x10]), Err(CodecError::BadValue));
+        // Every canonical value still round-trips.
+        for bits in 0..=0x0F_u8 {
+            let mut buf = Vec::new();
+            encode_event(
+                &WindowEvent::ModifiersChanged(ModifiersState::from_bits(bits)),
+                &mut buf,
+            );
+            let (event, used) = decode_event(&buf).unwrap();
+            let mut again = Vec::new();
+            encode_event(&event, &mut again);
+            assert_eq!(again, buf);
+            assert_eq!(used, buf.len());
+        }
     }
 
     #[test]
