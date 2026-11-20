@@ -55,14 +55,39 @@ fn main() {
 }
 ```
 
-Run the examples with:
+## First 10 minutes
+
+Run the examples. Each one opens a window; set `TPT_EXAMPLE_SECONDS=5` to have it exit by itself.
 
 ```sh
-cargo run -p tpt-window --example hello_window
-cargo run -p tpt-window --example event_dump
+cargo run -p tpt-window --example hello_window   # the smallest loop
+cargo run -p tpt-window --example event_dump     # every event, printed
+cargo run -p tpt-window --example input_state    # held keys and buttons, folded from events
+cargo run -p tpt-window --example multi_window   # two windows, one queue
 ```
 
-Minimum supported Rust version: **1.85** (edition 2024).
+Then read the three things that differ from most window libraries:
+
+1. **You own the loop.** Call `poll_events` or `step` yourself. `step(timeout)` waits its full
+   timeout when nothing happens, so when a display paces your loop, pass `Duration::ZERO`.
+2. **Events go through a queue you own.** `queue.dropped()` counts every event lost on the way.
+   Check it while you develop.
+3. **Modifiers are events.** `WindowEvent::ModifiersChanged` reports Shift, Control, Alt and
+   Super. Keys are reported by physical position (`physical_key`) and by layout (`key_code`).
+
+Pitfalls to know before you ship: on Windows the window is modal while the user drags or resizes
+it, so your loop stops; on the web the page must drive `tick` from `requestAnimationFrame`.
+
+## Which crate do I need
+
+| You want | Use |
+|----------|-----|
+| A window and events on a desktop or the web | `tpt-window` (the facade) |
+| Tests without a display | `tpt-window-test-utils` (headless backend) |
+| Game controllers, kept out of the window stream | `tpt-window-gamepad` |
+| Capability-gated, signed input for tpt-archon | `tpt-window-archon` |
+| Passing frames between processes on Windows | `tpt-window-shm` with `tpt-window-core::channel` |
+| `ecs` resources (`WindowResource`, `InputEventQueue`) | `tpt-window-core` with its `ecs` feature |
 
 ## Platform support
 
@@ -95,7 +120,7 @@ deliver committed text through `ImeEvent::Commit`.
 | `tpt-window-test-utils`  | Headless backend for tests, CI and fuzzing. |
 | `tpt-window-gamepad`     | Optional gamepad input over `gilrs`. Not part of the windowing layer. |
 | `tpt-window-archon`      | Capability bridge to tpt-archon: scope mapping, signed input events and a gated router. Works without tpt-archon. |
-| `tpt-window-shm`         | Shared-memory transport for the display protocol (Windows). Not yet in the workspace. |
+| `tpt-window-shm`         | Shared-memory transport for the display protocol (Windows). |
 | `tpt-window-bench`       | Benchmark against winit 0.30 on the same loop. Not published. |
 
 Each crate has its own README and CHANGELOG.

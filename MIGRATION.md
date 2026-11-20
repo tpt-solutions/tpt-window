@@ -158,6 +158,9 @@ Check these before you migrate. Each one is tracked in `todo.md`.
   `set_position` and `set_visible` have no effect. Fractional scale factors are not
   supported (integer scale only).
 - **Gamepads** are in `tpt-window-gamepad`, not in the window event stream.
-- **Ring buffer is caller-owned, drop-newest.** A full queue returns `BufferFull` and counts
-  the drop. winit has no queue to fill; if you relied on it never losing events, size the
-  queue for your frame rate and check `queue.dropped()`.
+- **Events are buffered in two places, and losses from both are counted.** The backend holds
+  OS events in a bounded pending queue of 4096. If your loop goes so long without polling that
+  it fills, the oldest events are evicted. Your queue is caller-owned and drop-newest: when it
+  is full, events stay pending in the backend and arrive on a later poll, so nothing is lost
+  there. Every loss is added to `queue.dropped()`. winit has no queue to fill; if you relied on
+  it never losing events, poll at your frame rate and check `queue.dropped()`.
