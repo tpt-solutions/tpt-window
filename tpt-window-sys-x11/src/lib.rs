@@ -54,6 +54,16 @@ struct WindowData {
     display: usize,
     screen: c_int,
     destroy_requested: AtomicBool,
+    /// Size limits and resizability, written into the WM hints when they change.
+    limits: Mutex<SizeLimits>,
+}
+
+/// Size limits in physical pixels, and whether the user may resize the window.
+#[derive(Clone, Copy, Debug)]
+struct SizeLimits {
+    min: Option<(c_int, c_int)>,
+    max: Option<(c_int, c_int)>,
+    resizable: bool,
 }
 
 /// Event-loop side of a window.
@@ -63,6 +73,19 @@ struct Record {
     size: PhysicalSize<u32>,
     position: PhysicalPosition<i32>,
     focused: bool,
+    /// Last modifier state reported, so `ModifiersChanged` is sent only on a change.
+    modifiers: ModifiersState,
+}
+
+/// Modifier state from an X `state` mask. The bit values are the core protocol's:
+/// Shift 1, Control 4, Mod1 (Alt) 8, Mod4 (Super) 64.
+fn x_modifiers(state: u32) -> ModifiersState {
+    ModifiersState::new(
+        state & (1 << 0) != 0,
+        state & (1 << 2) != 0,
+        state & (1 << 3) != 0,
+        state & (1 << 6) != 0,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -76,31 +99,37 @@ pub struct X11EventLoop {
     screen: c_int,
     scale: f64,
     wm_delete: c_ulong,
+    /// Atom for the Motif hints property, which removes window-manager decorations.
+    motif_hints: c_ulong,
     records: RefCell<Vec<Record>>,
-    pending: RefCell<VecDeque<Event>>,
+    pending: RefCell<EventQueue>,
     exit: Arc<AtomicBool>,
 }
 
 /// Creates an [`EventLoop`] connected to `$DISPLAY`. Fails when Xlib is not
 /// installed or no X server is reachable.
 pub fn new_event_loop() -> Result<EventLoop, WindowError> {
-    let xlib = Xlib::open().map_err(|e| WindowError::Os(format!("cannot load Xlib: {e}")))?;
+    let xlib = Xlib::open().map_err(|_| WindowError::Unsupported("Xlib is not installed"))?;
     // SAFETY: plain Xlib calls on a freshly opened display, with the error handler
     // installed before any other request is sent.
     let display = unsafe {
+        // Must come before any other Xlib call. The display is shared with other threads
+        // (the `Window` handles), and Xlib is not thread-safe unless this is set.
+        (xlib.XInitThreads)();
         (xlib.XSetErrorHandler)(Some(ignore_x_error));
         (xlib.XOpenDisplay)(ptr::null())
     };
     if display.is_null() {
-        return Err(WindowError::Os(
+        return Err(WindowError::NoDisplay(
             "cannot open the X display (is DISPLAY set?)".into(),
         ));
     }
     // SAFETY: `display` is valid until XCloseDisplay in Drop.
-    let (screen, wm_delete) = unsafe {
+    let (screen, wm_delete, motif_hints) = unsafe {
         let screen = (xlib.XDefaultScreen)(display);
         let atom = (xlib.XInternAtom)(display, c"WM_DELETE_WINDOW".as_ptr(), xlib::False);
-        (screen, atom)
+        let motif = (xlib.XInternAtom)(display, c"_MOTIF_WM_HINTS".as_ptr(), xlib::False);
+        (screen, atom, motif)
     };
     // Force the thread-local ring to allocate now, not on the hot path.
     // SAFETY: the display is open.
@@ -119,8 +148,9 @@ pub fn new_event_loop() -> Result<EventLoop, WindowError> {
         screen,
         scale,
         wm_delete,
+        motif_hints,
         records: RefCell::new(Vec::new()),
-        pending: RefCell::new(VecDeque::with_capacity(4096)),
+        pending: RefCell::new(new_pending_queue()),
         exit: Arc::new(AtomicBool::new(false)),
     })))
 }
@@ -142,12 +172,12 @@ unsafe fn dpi_scale(xlib: &Xlib, display: *mut Display) -> f64 {
         .map_or(1.0, |dpi| (dpi / 96.0).clamp(0.25, 8.0))
 }
 
-fn push_text(pending: &mut VecDeque<Event>, id: WindowId, text: &str) {
+fn push_text(pending: &mut EventQueue, id: WindowId, text: &str) {
     let mut rest: &str = text;
     while !rest.is_empty() {
         let (chunk, next) = ImeText::take_chunk(rest);
         let continued = !next.is_empty();
-        pending.push_back(Event {
+        pending.push(Event {
             window: id,
             event: WindowEvent::Ime(ImeEvent::Commit {
                 text: chunk,
@@ -207,7 +237,7 @@ impl X11EventLoop {
                 if size != rec.size {
                     rec.size = size;
                     rec.data.state.update(|s| s.size = size);
-                    out.push_back(Event {
+                    out.push(Event {
                         window: id,
                         event: WindowEvent::Resized(size),
                     });
@@ -215,7 +245,7 @@ impl X11EventLoop {
                 if position != rec.position {
                     rec.position = position;
                     rec.data.state.update(|s| s.position = position);
-                    out.push_back(Event {
+                    out.push(Event {
                         window: id,
                         event: WindowEvent::Moved(position),
                     });
@@ -235,8 +265,19 @@ impl X11EventLoop {
                 } else {
                     ElementState::Released
                 };
+                let mods = x_modifiers(key.state);
+                let mods_changed = {
+                    let mut records = self.records.borrow_mut();
+                    std::mem::replace(&mut records[i].modifiers, mods) != mods
+                };
                 let mut out = self.pending.borrow_mut();
-                out.push_back(Event {
+                if mods_changed {
+                    out.push(Event {
+                        window: id,
+                        event: WindowEvent::ModifiersChanged(mods),
+                    });
+                }
+                out.push(Event {
                     window: id,
                     event: WindowEvent::KeyboardInput {
                         state,
@@ -269,7 +310,7 @@ impl X11EventLoop {
                             6 => (-1.0, 0.0),
                             _ => (1.0, 0.0),
                         };
-                        out.push_back(Event {
+                        out.push(Event {
                             window: id,
                             event: WindowEvent::MouseWheel {
                                 delta: MouseScrollDelta::LineDelta { x, y },
@@ -280,7 +321,7 @@ impl X11EventLoop {
                     4..=7 => {}
                     code => {
                         if let Some(button) = mouse_button(code) {
-                            out.push_back(Event {
+                            out.push(Event {
                                 window: id,
                                 event: WindowEvent::MouseInput {
                                     state: if pressed {
@@ -300,7 +341,7 @@ impl X11EventLoop {
                 let m = unsafe { ev.motion };
                 if let Some(i) = self.record_index(m.window) {
                     let id = self.records.borrow()[i].data.id;
-                    self.pending.borrow_mut().push_back(Event {
+                    self.pending.borrow_mut().push(Event {
                         window: id,
                         event: WindowEvent::CursorMoved {
                             position: PhysicalPosition::new(f64::from(m.x), f64::from(m.y)),
@@ -319,9 +360,7 @@ impl X11EventLoop {
                     } else {
                         WindowEvent::CursorLeft
                     };
-                    self.pending
-                        .borrow_mut()
-                        .push_back(Event { window: id, event });
+                    self.pending.borrow_mut().push(Event { window: id, event });
                 }
             }
             xlib::FocusIn | xlib::FocusOut => {
@@ -333,7 +372,16 @@ impl X11EventLoop {
                     let rec = &mut records[i];
                     rec.focused = focused;
                     rec.data.state.update(|s| s.focused = focused);
-                    self.pending.borrow_mut().push_back(Event {
+                    let mut pending = self.pending.borrow_mut();
+                    if !focused && rec.modifiers != ModifiersState::empty() {
+                        // Keys released while unfocused send no events; clear the modifiers.
+                        rec.modifiers = ModifiersState::empty();
+                        pending.push(Event {
+                            window: rec.data.id,
+                            event: WindowEvent::ModifiersChanged(rec.modifiers),
+                        });
+                    }
+                    pending.push(Event {
                         window: rec.data.id,
                         event: WindowEvent::Focused(focused),
                     });
@@ -347,7 +395,7 @@ impl X11EventLoop {
                 if first as c_ulong == self.wm_delete {
                     if let Some(i) = self.record_index(c.window) {
                         let id = self.records.borrow()[i].data.id;
-                        self.pending.borrow_mut().push_back(Event {
+                        self.pending.borrow_mut().push(Event {
                             window: id,
                             event: WindowEvent::CloseRequested,
                         });
@@ -422,6 +470,34 @@ impl X11EventLoop {
                     }
                     // Xlib has no redraw request; the renderer presents on its own.
                     WindowCommand::RequestRedraw => {}
+                    WindowCommand::SetMinSize(m) => {
+                        let mut l = rec.data.limits.lock().unwrap_or_else(|e| e.into_inner());
+                        l.min = m.map(|m| (m.width as c_int, m.height as c_int));
+                        self.write_size_hints(rec.window, rec.size, *l);
+                    }
+                    WindowCommand::SetMaxSize(m) => {
+                        let mut l = rec.data.limits.lock().unwrap_or_else(|e| e.into_inner());
+                        l.max = m.map(|m| (m.width as c_int, m.height as c_int));
+                        self.write_size_hints(rec.window, rec.size, *l);
+                    }
+                    WindowCommand::SetResizable(r) => {
+                        let mut l = rec.data.limits.lock().unwrap_or_else(|e| e.into_inner());
+                        l.resizable = r;
+                        self.write_size_hints(rec.window, rec.size, *l);
+                    }
+                    WindowCommand::SetMinimized(true) => {
+                        // SAFETY: as above.
+                        unsafe {
+                            (self.xlib.XIconifyWindow)(self.display, rec.window, self.screen)
+                        };
+                    }
+                    WindowCommand::SetMinimized(false) => {
+                        // Mapping a minimized window restores it.
+                        // SAFETY: as above.
+                        unsafe { (self.xlib.XMapWindow)(self.display, rec.window) };
+                    }
+                    // Maximizing needs the _NET_WM_STATE client message, which is not written yet.
+                    WindowCommand::SetMaximized(_) => {}
                     _ => {}
                 }
             }
@@ -430,7 +506,7 @@ impl X11EventLoop {
                 // SAFETY: the window is still live; it is destroyed exactly once here.
                 unsafe { (self.xlib.XDestroyWindow)(self.display, rec.window) };
                 rec.data.window.store(0, Ordering::Release);
-                self.pending.borrow_mut().push_back(Event {
+                self.pending.borrow_mut().push(Event {
                     window: rec.data.id,
                     event: WindowEvent::Destroyed,
                 });
@@ -442,19 +518,34 @@ impl X11EventLoop {
         unsafe { (self.xlib.XFlush)(self.display) };
     }
 
+    /// Writes the normal size hints: the limits, or a fixed size when not resizable.
+    fn write_size_hints(&self, window: c_ulong, size: PhysicalSize<u32>, l: SizeLimits) {
+        // SAFETY: zeroed XSizeHints is a valid starting value; every field is set below.
+        let mut hints: XSizeHints = unsafe { std::mem::zeroed() };
+        if let Some((w, h)) = l.min {
+            hints.flags |= xlib::PMinSize;
+            hints.min_width = w;
+            hints.min_height = h;
+        }
+        if let Some((w, h)) = l.max {
+            hints.flags |= xlib::PMaxSize;
+            hints.max_width = w;
+            hints.max_height = h;
+        }
+        if !l.resizable {
+            hints.flags |= xlib::PMinSize | xlib::PMaxSize;
+            hints.min_width = size.width as c_int;
+            hints.min_height = size.height as c_int;
+            hints.max_width = size.width as c_int;
+            hints.max_height = size.height as c_int;
+        }
+        // SAFETY: the display is open and `hints` lives across the call.
+        unsafe { (self.xlib.XSetWMNormalHints)(self.display, window, &mut hints) };
+    }
+
     /// Moves queued events into the caller's sink.
     fn deliver(&self, sink: &mut EventSink<'_>) -> PollStatus {
-        let mut pending = self.pending.borrow_mut();
-        let mut delivered = false;
-        while let Some(ev) = pending.front().copied() {
-            match sink.push(ev) {
-                EventStatus::Accepted => {
-                    pending.pop_front();
-                    delivered = true;
-                }
-                EventStatus::BufferFull | EventStatus::Captured => break,
-            }
-        }
+        let delivered = sink.drain_pending(&mut self.pending.borrow_mut());
         if self.exit.load(Ordering::Acquire) {
             PollStatus::Exit
         } else if delivered {
@@ -547,7 +638,9 @@ impl EventLoopBackend for X11EventLoop {
         let mut protocol = self.wm_delete;
         let mut hints: XSizeHints = unsafe { std::mem::zeroed() };
         hints.flags = 0;
-        let fixed = !attrs.resizable || !attrs.decorations;
+        // Only `resizable: false` pins the size. Removing decorations does not: the size
+        // limits below must still apply to an undecorated window.
+        let fixed = !attrs.resizable;
         if let Some(min) = attrs.min_size {
             hints.flags |= xlib::PMinSize;
             hints.min_width = (min.width * scale) as c_int;
@@ -571,6 +664,22 @@ impl EventLoopBackend for X11EventLoop {
             (self.xlib.XStoreName)(self.display, window, title.as_ptr());
             (self.xlib.XSetWMProtocols)(self.display, window, &mut protocol, 1);
             (self.xlib.XSetWMNormalHints)(self.display, window, &mut hints);
+            if !attrs.decorations {
+                // Motif hints: flags = MWM_HINTS_DECORATIONS (bit 1), decorations = 0. The
+                // window managers that read this remove the frame; the others ignore it.
+                const MWM_HINTS_DECORATIONS: std::os::raw::c_ulong = 1 << 1;
+                let motif: [std::os::raw::c_ulong; 5] = [MWM_HINTS_DECORATIONS, 0, 0, 0, 0];
+                (self.xlib.XChangeProperty)(
+                    self.display,
+                    window,
+                    self.motif_hints,
+                    self.motif_hints,
+                    32,
+                    xlib::PropModeReplace,
+                    motif.as_ptr().cast::<std::os::raw::c_uchar>(),
+                    5,
+                );
+            }
             if attrs.visible {
                 (self.xlib.XMapWindow)(self.display, window);
             }
@@ -592,6 +701,15 @@ impl EventLoopBackend for X11EventLoop {
             display: self.display as usize,
             screen: self.screen,
             destroy_requested: AtomicBool::new(false),
+            limits: Mutex::new(SizeLimits {
+                min: attrs
+                    .min_size
+                    .map(|m| ((m.width * scale) as c_int, (m.height * scale) as c_int)),
+                max: attrs
+                    .max_size
+                    .map(|m| ((m.width * scale) as c_int, (m.height * scale) as c_int)),
+                resizable: attrs.resizable,
+            }),
         });
         self.records.borrow_mut().push(Record {
             window,
@@ -599,6 +717,7 @@ impl EventLoopBackend for X11EventLoop {
             size,
             position: PhysicalPosition::new(x, y),
             focused: false,
+            modifiers: ModifiersState::empty(),
         });
         Ok(Arc::new(X11Window { data }))
     }

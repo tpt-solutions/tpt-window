@@ -12,9 +12,9 @@ keywords = ["x11", "xlib", "linux", "windowing", "xorg"]
 categories = ["os::unix-apis", "gui"]
 
 [dependencies]
-raw-window-handle = "0.6"
-tpt-window-core = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+raw-window-handle = "0.6"
+tpt-window-core = { workspace = true }
 x11-dl = "2.21"
 libc = "0.2"
