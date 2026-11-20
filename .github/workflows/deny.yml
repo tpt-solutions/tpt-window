@@ -1,0 +1,15 @@
+name: Dependency advisories
+on:
+  schedule:
+    # Every Monday, so a new advisory on an unchanged dependency tree is still found.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
