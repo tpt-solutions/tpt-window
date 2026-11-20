@@ -103,6 +103,18 @@ pub enum WindowCommand {
     SetMaximized(bool),
     /// Minimize (`true`) or restore (`false`).
     SetMinimized(bool),
+    /// Show (`true`) or hide (`false`) the mouse pointer while it is over the window.
+    SetCursorVisible(bool),
+    /// Show (`true`) or remove (`false`) the title bar and border. The client area keeps its size.
+    SetDecorations(bool),
+    /// Cover the display the window is on (`true`), or return to the previous size (`false`).
+    SetFullscreen(bool),
+    /// Confine or lock the pointer to the window.
+    SetCursorGrab(crate::input::CursorGrab),
+    /// Set or clear (`None`) the window icon.
+    SetIcon(Option<crate::icon::Icon>),
+    /// Keep the window above other windows (`true`), or let it sit in the normal order.
+    SetAlwaysOnTop(bool),
 }
 
 /// Creation parameters, built by [`WindowBuilder`](crate::WindowBuilder).
@@ -163,6 +175,15 @@ pub trait EventLoopBackend {
         &self,
         attrs: &WindowAttributes,
     ) -> Result<Arc<dyn WindowBackend>, WindowError>;
+    /// A handle that can interrupt a blocked `step` from another thread. `None` (the default)
+    /// means this backend cannot, and the loop notices other threads only at its timeout.
+    fn wake_handle(&self) -> Option<Arc<dyn crate::proxy::Wake>> {
+        None
+    }
+    /// The displays attached now. Backends that cannot enumerate them return none.
+    fn monitors(&self) -> Vec<crate::monitor::MonitorInfo> {
+        Vec::new()
+    }
 }
 
 /// A platform window.
@@ -181,4 +202,12 @@ pub trait WindowBackend: Send + Sync {
     }
     /// Queue a command; applied on the backend's next poll.
     fn send_command(&self, command: WindowCommand);
+    /// The display the window is on now. `None` when the backend cannot tell.
+    fn current_monitor(&self) -> Option<crate::monitor::MonitorInfo> {
+        None
+    }
+    /// The system's current appearance. `None` when the backend cannot tell.
+    fn theme(&self) -> Option<crate::theme::Theme> {
+        None
+    }
 }

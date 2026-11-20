@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The caller-driven event loop.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -13,6 +15,8 @@ use crate::backend::{EventLoopBackend, PollStatus, WindowAttributes};
 use crate::error::WindowError;
 use crate::event::{Event, WindowEvent};
 use crate::ids::WindowId;
+use crate::monitor::MonitorInfo;
+use crate::proxy::EventLoopProxy;
 use crate::sink::{EventSink, EventStatus};
 use crate::window::Window;
 
@@ -23,7 +27,9 @@ use crate::window::Window;
 /// (`tpt_window::new_event_loop()`), because core cannot name a backend.
 pub struct EventLoop {
     inner: Box<dyn EventLoopBackend>,
-    exit: AtomicBool,
+    exit: Arc<AtomicBool>,
+    /// Values sent by [`EventLoopProxy::send_user`], waiting for the next poll.
+    user: Arc<Mutex<VecDeque<u64>>>,
     emit_yield_points: bool,
     frame: u64,
     start: Instant,
@@ -34,7 +40,8 @@ impl EventLoop {
     pub fn with_backend(inner: Box<dyn EventLoopBackend>) -> Self {
         Self {
             inner,
-            exit: AtomicBool::new(false),
+            exit: Arc::new(AtomicBool::new(false)),
+            user: Arc::new(Mutex::new(VecDeque::new())),
             emit_yield_points: true,
             frame: 0,
             start: Instant::now(),
@@ -60,6 +67,20 @@ impl EventLoop {
         self.finish_frame(sink, status)
     }
 
+    /// The displays attached right now. Empty on backends that cannot enumerate them.
+    pub fn available_monitors(&self) -> Vec<MonitorInfo> {
+        self.inner.monitors()
+    }
+
+    /// A handle for other threads to wake this loop or stop it. See [`EventLoopProxy`].
+    pub fn proxy(&self) -> EventLoopProxy {
+        let wake = self
+            .inner
+            .wake_handle()
+            .unwrap_or_else(|| Arc::new(crate::proxy::NoWake));
+        EventLoopProxy::new(wake, self.exit.clone(), self.user.clone())
+    }
+
     /// Asks the loop to terminate; the next poll returns [`PollStatus::Exit`]. Call it from the
     /// thread that owns the loop, since `EventLoop` is not `Send`.
     pub fn request_exit(&self) {
@@ -71,7 +92,24 @@ impl EventLoop {
         self.inner.create_window(attrs).map(Window::from_backend)
     }
 
+    /// Moves user values into the sink in the order they were sent. When the sink is full, the
+    /// rest stay queued for the next poll, so nothing is lost.
+    fn deliver_user(&self, sink: &mut EventSink<'_>) {
+        let mut queue = self.user.lock().unwrap_or_else(|e| e.into_inner());
+        while let Some(&value) = queue.front() {
+            let event = Event {
+                window: WindowId::NONE,
+                event: WindowEvent::User(value),
+            };
+            if sink.push(event) != EventStatus::Accepted {
+                break;
+            }
+            queue.pop_front();
+        }
+    }
+
     fn finish_frame(&mut self, sink: &mut EventSink<'_>, status: PollStatus) -> PollStatus {
+        self.deliver_user(sink);
         if self.emit_yield_points {
             let timestamp_ns = u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX);
             // If the queue is full the yield point is lost. That is counted as a

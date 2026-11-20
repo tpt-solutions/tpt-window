@@ -44,6 +44,28 @@ pub enum WindowEvent {
         /// Layout-independent key position.
         physical_key: PhysicalKey,
     },
+    /// A file is being dragged over the window. A path longer than one chunk arrives as several
+    /// events, with `continued` set until the last. Use [`PathAssembler`] to rebuild it.
+    FileHovered {
+        /// This part of the path.
+        chunk: crate::text::ImeText,
+        /// Whether more parts of this path follow.
+        continued: bool,
+    },
+    /// A file was dropped on the window. Chunked like [`WindowEvent::FileHovered`].
+    FileDropped {
+        /// This part of the path.
+        chunk: crate::text::ImeText,
+        /// Whether more parts of this path follow.
+        continued: bool,
+    },
+    /// A drag left the window without dropping anything.
+    FileHoverCancelled,
+    /// A value sent from another thread with [`EventLoopProxy::send_user`](crate::EventLoopProxy::send_user).
+    /// Values arrive in the order they were sent.
+    User(u64),
+    /// The system switched between light and dark appearance.
+    ThemeChanged(crate::theme::Theme),
     /// The modifier keys held changed. Sent before the key event that caused it.
     ModifiersChanged(crate::input::ModifiersState),
     /// Input method event.
@@ -128,3 +150,59 @@ const _: () = {
     assert_copy::<Event>();
     assert!(core::mem::size_of::<Event>() <= 64);
 };
+
+/// Rebuilds a file path from the chunks of [`WindowEvent::FileDropped`] or
+/// [`WindowEvent::FileHovered`]. Feed each chunk in arrival order; when `push` returns a path,
+/// the path is complete.
+#[derive(Debug, Default)]
+pub struct PathAssembler {
+    text: String,
+}
+
+impl PathAssembler {
+    /// An empty assembler.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a chunk. Returns the whole path when `continued` is false, and starts a new one
+    /// afterwards.
+    pub fn push(&mut self, chunk: &crate::text::ImeText, continued: bool) -> Option<String> {
+        self.text.push_str(chunk.as_str());
+        if continued {
+            None
+        } else {
+            Some(std::mem::take(&mut self.text))
+        }
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use crate::text::ImeText;
+
+    #[test]
+    fn chunks_rebuild_a_long_path() {
+        let path = "C:/Users/a very long directory name with spaces/文件 and more/file.txt";
+        let mut rest = path;
+        let mut asm = PathAssembler::new();
+        let mut done = None;
+        while !rest.is_empty() {
+            let (chunk, next) = ImeText::take_chunk(rest);
+            let continued = !next.is_empty();
+            done = asm.push(&chunk, continued);
+            rest = next;
+        }
+        assert_eq!(done.as_deref(), Some(path));
+    }
+
+    #[test]
+    fn a_short_path_is_one_chunk() {
+        let mut asm = PathAssembler::new();
+        assert_eq!(
+            asm.push(&ImeText::new("a.txt"), false).as_deref(),
+            Some("a.txt")
+        );
+    }
+}

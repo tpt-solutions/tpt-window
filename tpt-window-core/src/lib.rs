@@ -16,36 +16,48 @@
 
 pub mod backend;
 pub mod channel;
+pub mod codec;
 pub mod dpi;
 #[cfg(feature = "ecs")]
 pub mod ecs;
 pub mod error;
 pub mod event;
 pub mod event_loop;
+pub mod icon;
 pub mod ids;
 pub mod input;
+pub mod keymap;
+pub mod monitor;
 pub mod protocol;
+pub mod proxy;
+pub mod record;
 pub mod ring;
 pub mod security;
 pub mod sink;
+pub mod tap;
 pub mod text;
+pub mod theme;
 pub mod window;
 
 pub use backend::{
     EventLoopBackend, PollStatus, SharedWindowState, WindowAttributes, WindowBackend,
     WindowCommand, WindowState,
 };
-pub use dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
+pub use dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, Position, Size};
 pub use error::WindowError;
-pub use event::{Event, WindowEvent};
+pub use event::{Event, PathAssembler, WindowEvent};
 pub use event_loop::EventLoop;
+pub use icon::{Icon, IconError};
 pub use ids::WindowId;
 pub use input::*;
+pub use monitor::MonitorInfo;
+pub use proxy::EventLoopProxy;
 pub use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 pub use ring::{DEFAULT_CAPACITY, OverflowPolicy, RingBuffer};
 pub use security::{CapabilityToken, DisplayScope, InputScope, SurfaceHandle, WindowScope};
 pub use sink::{EventQueue, EventSink, EventStatus, PENDING_CAPACITY, new_pending_queue};
 pub use text::{ImeEvent, ImeText, InlineText};
+pub use theme::Theme;
 pub use window::{Window, WindowBuilder};
 
 #[cfg(feature = "ecs")]

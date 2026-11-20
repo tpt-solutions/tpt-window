@@ -476,6 +476,18 @@ pub fn key_from_evdev(code: u32) -> KeyCode {
     }
 }
 
+/// How the pointer is held to a window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum CursorGrab {
+    /// The pointer moves freely.
+    #[default]
+    None,
+    /// The pointer cannot leave the window's client area. It stays visible.
+    Confined,
+    /// As `Confined`, and the pointer image is hidden. Raw motion keeps reporting.
+    Locked,
+}
+
 /// The modifier keys held down. A plain bit set, so it is `Copy` and small enough for an event.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ModifiersState(u8);

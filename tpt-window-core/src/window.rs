@@ -91,13 +91,16 @@ impl Window {
     }
 
     /// Resize (applied on next poll).
-    pub fn set_size(&self, size: PhysicalSize<u32>) {
-        self.inner.send_command(WindowCommand::SetSize(size));
+    pub fn set_size(&self, size: impl Into<crate::dpi::Size>) {
+        let physical = size.into().to_physical(self.scale_factor());
+        self.inner.send_command(WindowCommand::SetSize(physical));
     }
 
     /// Move (applied on next poll).
-    pub fn set_position(&self, pos: PhysicalPosition<i32>) {
-        self.inner.send_command(WindowCommand::SetPosition(pos));
+    pub fn set_position(&self, pos: impl Into<crate::dpi::Position>) {
+        let physical = pos.into().to_physical(self.scale_factor());
+        self.inner
+            .send_command(WindowCommand::SetPosition(physical));
     }
 
     /// Show or hide (applied on next poll).
@@ -121,13 +124,15 @@ impl Window {
     }
 
     /// Sets or clears the minimum inner size (physical pixels). Applied on the next poll.
-    pub fn set_min_size(&self, size: Option<PhysicalSize<u32>>) {
-        self.inner.send_command(WindowCommand::SetMinSize(size));
+    pub fn set_min_size<S: Into<crate::dpi::Size>>(&self, size: Option<S>) {
+        let physical = size.map(|s| s.into().to_physical(self.scale_factor()));
+        self.inner.send_command(WindowCommand::SetMinSize(physical));
     }
 
     /// Sets or clears the maximum inner size (physical pixels). Applied on the next poll.
-    pub fn set_max_size(&self, size: Option<PhysicalSize<u32>>) {
-        self.inner.send_command(WindowCommand::SetMaxSize(size));
+    pub fn set_max_size<S: Into<crate::dpi::Size>>(&self, size: Option<S>) {
+        let physical = size.map(|s| s.into().to_physical(self.scale_factor()));
+        self.inner.send_command(WindowCommand::SetMaxSize(physical));
     }
 
     /// Allows or forbids resizing by the user. Applied on the next poll.
@@ -146,6 +151,56 @@ impl Window {
     pub fn set_minimized(&self, minimized: bool) {
         self.inner
             .send_command(WindowCommand::SetMinimized(minimized));
+    }
+
+    /// The display this window is on right now, if the platform can tell.
+    pub fn current_monitor(&self) -> Option<crate::monitor::MonitorInfo> {
+        self.inner.current_monitor()
+    }
+
+    /// The system's current light or dark appearance, if the platform reports one.
+    pub fn theme(&self) -> Option<crate::theme::Theme> {
+        self.inner.theme()
+    }
+
+    /// Shows or removes the title bar and border. The client area keeps its size. Applied on the
+    /// next poll.
+    pub fn set_decorations(&self, decorations: bool) {
+        self.inner
+            .send_command(WindowCommand::SetDecorations(decorations));
+    }
+
+    /// Covers the display the window is on (`true`), or restores the previous size (`false`).
+    /// Applied on the next poll.
+    pub fn set_fullscreen(&self, fullscreen: bool) {
+        self.inner
+            .send_command(WindowCommand::SetFullscreen(fullscreen));
+    }
+
+    /// Keeps the window above other windows, or returns it to the normal order. Applied on the
+    /// next poll.
+    pub fn set_always_on_top(&self, on_top: bool) {
+        self.inner
+            .send_command(WindowCommand::SetAlwaysOnTop(on_top));
+    }
+
+    /// Confines or locks the pointer to this window. Applied on the next poll. Only Win32 acts on
+    /// this so far; other platforms accept the call and ignore it.
+    pub fn set_cursor_grab(&self, grab: crate::input::CursorGrab) {
+        self.inner.send_command(WindowCommand::SetCursorGrab(grab));
+    }
+
+    /// Sets or clears the window icon. Applied on the next poll. Win32 and X11 show it; other
+    /// platforms accept the call and ignore it.
+    pub fn set_icon(&self, icon: Option<crate::icon::Icon>) {
+        self.inner.send_command(WindowCommand::SetIcon(icon));
+    }
+
+    /// Shows or hides the mouse pointer over this window. Applied on the next poll. A hidden
+    /// pointer still moves and still sends events; only its image is hidden.
+    pub fn set_cursor_visible(&self, visible: bool) {
+        self.inner
+            .send_command(WindowCommand::SetCursorVisible(visible));
     }
 }
 

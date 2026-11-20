@@ -17,6 +17,38 @@
 //! Ordering is the platform's job. `store_u32` must be a release store and `load_u32` an
 //! acquire load, and the data bytes must be written before the head store. Without that,
 //! the consumer can read a frame before it is complete.
+//!
+//! A ring over plain memory, as a test or an in-process pipe would use. A real transport
+//! supplies a `RingMemory` backed by a shared mapping (see `tpt-window-shm` and
+//! `tpt-window-memfd`):
+//!
+//! ```
+//! use tpt_window_core::channel::{FrameRing, RingMemory};
+//! use tpt_window_core::protocol::Message;
+//!
+//! struct Memory(Vec<u8>);
+//!
+//! impl RingMemory for Memory {
+//!     fn len(&self) -> usize { self.0.len() }
+//!     fn read(&self, offset: usize, out: &mut [u8]) {
+//!         out.copy_from_slice(&self.0[offset..offset + out.len()]);
+//!     }
+//!     fn write(&mut self, offset: usize, data: &[u8]) {
+//!         self.0[offset..offset + data.len()].copy_from_slice(data);
+//!     }
+//!     fn load_u32(&self, offset: usize) -> u32 {
+//!         u32::from_le_bytes(self.0[offset..offset + 4].try_into().unwrap())
+//!     }
+//!     fn store_u32(&mut self, offset: usize, value: u32) {
+//!         self.0[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+//!     }
+//! }
+//!
+//! let mut ring = FrameRing::new(Memory(vec![0; 8192 + 16])).unwrap();
+//! ring.reset();
+//! ring.push(&Message::Hello { version: 1 }).unwrap();
+//! assert_eq!(ring.pop().unwrap(), Some(Message::Hello { version: 1 }));
+//! ```
 
 use crate::protocol::{self, DecodeError, Message};
 
