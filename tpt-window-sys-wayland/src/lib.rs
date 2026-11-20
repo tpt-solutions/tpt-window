@@ -115,16 +115,18 @@ pub struct WaylandState {
     windows: Vec<Record>,
     /// Window that has keyboard focus.
     keyboard_focus: Option<WindowId>,
+    /// Modifiers last reported to the focused window.
+    modifiers: ModifiersState,
     /// Window the pointer is over, with its last logical pointer position.
     pointer_over: Option<(WindowId, f64, f64)>,
-    pending: VecDeque<Event>,
+    pending: EventQueue,
     /// Handle of the event loop, used by sctk to schedule key-repeat timers.
     loop_handle: LoopHandle<'static, WaylandState>,
 }
 
 impl WaylandState {
     fn push(&mut self, window: WindowId, event: WindowEvent) {
-        self.pending.push_back(Event { window, event });
+        self.pending.push(Event { window, event });
     }
 
     /// Reports a key press (also used for each auto-repeat from sctk).
@@ -348,6 +350,12 @@ impl KeyboardHandler for WaylandState {
         if let Some(i) = self.record_for_surface(surface) {
             let id = self.windows[i].data.id;
             self.keyboard_focus = None;
+            // Keys released while unfocused send no events, so the modifiers are cleared here.
+            if self.modifiers != ModifiersState::empty() {
+                let cleared = ModifiersState::empty();
+                self.modifiers = cleared;
+                self.push(id, WindowEvent::ModifiersChanged(cleared));
+            }
             self.windows[i].data.state.update(|s| s.focused = false);
             self.push(id, WindowEvent::Focused(false));
         }
@@ -392,10 +400,21 @@ impl KeyboardHandler for WaylandState {
         _qh: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
         _serial: u32,
-        _modifiers: Modifiers,
+        modifiers: Modifiers,
         _layout: u32,
     ) {
-        // Modifier keys arrive as key events, so the state is tracked by the caller.
+        let mods = ModifiersState::new(
+            modifiers.shift,
+            modifiers.ctrl,
+            modifiers.alt,
+            modifiers.logo,
+        );
+        if mods != self.modifiers {
+            self.modifiers = mods;
+            if let Some(id) = self.keyboard_focus {
+                self.push(id, WindowEvent::ModifiersChanged(mods));
+            }
+        }
     }
 }
 
@@ -569,7 +588,7 @@ pub struct WaylandEventLoop {
 /// (no `WAYLAND_DISPLAY`).
 pub fn new_event_loop() -> Result<EventLoop, WindowError> {
     let conn = Connection::connect_to_env()
-        .map_err(|e| WindowError::Os(format!("cannot connect to Wayland: {e}")))?;
+        .map_err(|e| WindowError::NoDisplay(format!("cannot connect to Wayland: {e}")))?;
     let (globals, event_queue) =
         registry_queue_init::<WaylandState>(&conn).map_err(|e| WindowError::Os(e.to_string()))?;
     let qh = event_queue.handle();
@@ -591,8 +610,9 @@ pub fn new_event_loop() -> Result<EventLoop, WindowError> {
         pointer: None,
         windows: Vec::new(),
         keyboard_focus: None,
+        modifiers: ModifiersState::empty(),
         pointer_over: None,
-        pending: VecDeque::with_capacity(4096),
+        pending: new_pending_queue(),
     };
     WaylandSource::new(conn.clone(), event_queue)
         .insert(calloop.handle())
@@ -620,11 +640,21 @@ impl WaylandEventLoop {
                 q.drain(..).collect()
             };
             for cmd in cmds {
-                if let WindowCommand::SetTitle(t) = cmd {
-                    rec.window.set_title(t);
+                match cmd {
+                    WindowCommand::SetTitle(t) => rec.window.set_title(t),
+                    WindowCommand::SetMinSize(m) => {
+                        rec.window.set_min_size(m.map(|m| (m.width, m.height)));
+                    }
+                    WindowCommand::SetMaxSize(m) => {
+                        rec.window.set_max_size(m.map(|m| (m.width, m.height)));
+                    }
+                    WindowCommand::SetMaximized(true) => rec.window.set_maximized(),
+                    WindowCommand::SetMaximized(false) => rec.window.unset_maximized(),
+                    WindowCommand::SetMinimized(true) => rec.window.set_minimized(),
+                    // SetSize, SetPosition, SetVisible, SetResizable, SetMinimized(false)
+                    // and RequestRedraw are not expressible in Wayland; see the crate notes.
+                    _ => {}
                 }
-                // SetSize, SetPosition, SetVisible and RequestRedraw are not
-                // expressible in Wayland; see the crate notes.
             }
         }
         let mut i = 0;
@@ -649,16 +679,7 @@ impl WaylandEventLoop {
     /// Moves queued events into the caller's sink.
     fn deliver(&self, sink: &mut EventSink<'_>) -> PollStatus {
         let mut state = self.state.borrow_mut();
-        let mut delivered = false;
-        while let Some(ev) = state.pending.front().copied() {
-            match sink.push(ev) {
-                EventStatus::Accepted => {
-                    state.pending.pop_front();
-                    delivered = true;
-                }
-                EventStatus::BufferFull | EventStatus::Captured => break,
-            }
-        }
+        let delivered = sink.drain_pending(&mut state.pending);
         if self.exit.load(Ordering::Acquire) {
             PollStatus::Exit
         } else if delivered {

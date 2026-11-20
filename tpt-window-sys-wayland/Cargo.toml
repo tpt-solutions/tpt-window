@@ -12,9 +12,9 @@ keywords = ["wayland", "linux", "windowing", "sctk", "smithay"]
 categories = ["os::unix-apis", "gui"]
 
 [dependencies]
-raw-window-handle = "0.6"
-tpt-window-core = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+raw-window-handle = "0.6"
+tpt-window-core = { workspace = true }
 sctk = { package = "smithay-client-toolkit", version = "0.19", default-features = false, features = ["calloop", "xkbcommon"] }
 wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
