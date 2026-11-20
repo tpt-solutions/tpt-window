@@ -16,6 +16,9 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - Lifecycle test (`tests/real_window.rs`) in a CI job with headless Weston.
 - Key repeat from sctk's repeat timer: a held key sends repeated `Pressed` events
   (text included), sharing the press path with the normal key event.
+- Window commands for minimum and maximum size, resizable, maximize and minimize, applied
+  through xdg-shell where Wayland allows. Compile-checked from Windows; not yet run on a
+  compositor.
 
 ### Notes
 - `SetSize`, `SetPosition` and `SetVisible` are ignored, because Wayland does not

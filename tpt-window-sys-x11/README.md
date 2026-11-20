@@ -41,6 +41,8 @@ client does not expose it. Xlib is therefore the backend's native API.
   auto-repeat (see below).
 - Configure-driven resize and move.
 - `WM_DELETE_WINDOW` close handling.
+- Window setters for the core state commands, applied on the loop thread. These are
+  compile-checked from Windows and not yet run under X11.
 
 ## Known gaps
 

@@ -20,6 +20,8 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - Lifecycle test (`tests/real_window.rs`) in a CI job under Xvfb.
 - Key repeat test (`tests/key_repeat.rs`): drives a held key through XTest and checks
   the press counts.
+- Window setters for the core state commands, applied on the loop thread. Compile-checked from
+  Windows; not yet run under X11 for these.
 
 ### Known gaps
 - No IME.
