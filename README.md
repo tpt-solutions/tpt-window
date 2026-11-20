@@ -94,17 +94,45 @@ it, so your loop stops; on the web the page must drive `tick` from `requestAnima
 | Target                         | Backend crate            | Status |
 |--------------------------------|--------------------------|--------|
 | Windows (x86_64, i686)         | `tpt-window-sys-win32`   | Implemented and tested, including touch, raw mouse and IME placement. Pen and transparency are not implemented. |
-| macOS                          | `tpt-window-sys-cocoa`   | Implemented. Compile-checked only; the CI test has not yet been seen passing. |
-| Linux, X11                     | `tpt-window-sys-x11`     | Implemented, including key repeat. Lifecycle test runs under Xvfb in CI. |
-| Linux, Wayland                 | `tpt-window-sys-wayland` | Implemented, including key repeat. Tested under headless Weston in CI, not on a real compositor. |
+| macOS                          | `tpt-window-sys-cocoa`   | Implemented. Compile-checked only; not run on a Mac yet. |
+| Linux, X11                     | `tpt-window-sys-x11`     | Implemented, including key repeat. Lifecycle test runs under Xvfb in CI. Compile-checked from Windows. |
+| Linux, Wayland                 | `tpt-window-sys-wayland` | Implemented, including key repeat. Tested under headless Weston in CI, not on a real compositor. Compile-checked from Windows. |
 | Web (`wasm32-unknown-unknown`) | `tpt-window-sys-wasm`    | Rendering checked in Edge with WebGPU. Input and resize checked in Chromium. Firefox and Safari not checked. |
 | Anything else                  | none                     | `new_event_loop()` returns `WindowError::Unsupported`. |
 
 On Linux, `new_event_loop()` uses Wayland when `WAYLAND_DISPLAY` is set and the
 connection succeeds, and X11 otherwise.
 
-IME composition (`ImeEvent::Preedit`) is implemented on Win32 only. Other backends
-deliver committed text through `ImeEvent::Commit`.
+### Feature status
+
+Each cell says how the feature was checked. **Tested** means a test ran the real code on that
+platform (the X11 and Wayland tests run in CI). **Compiled** means it type-checks and lints for the target, but has not run. **Partial**
+means it works with a stated limit. **No** means it is not implemented, and the call is accepted
+and has no effect.
+
+| Feature                          | Windows | macOS    | X11     | Wayland  | Web     |
+|----------------------------------|---------|----------|---------|----------|---------|
+| Windows, events, close           | Tested  | Compiled | Tested  | Tested   | Tested  |
+| Redraw requests                  | Compiled | Compiled | Compiled | No       | Compiled |
+| Key repeat                       | Compiled | Compiled | Tested  | Compiled | Compiled |
+| Layout key codes (`key_code`)     | Tested  | Compiled | Compiled | Compiled | Compiled |
+| Modifier state                   | Tested  | Compiled | Compiled| Compiled | Compiled|
+| IME commit                       | Tested  | Compiled | Partial (keysym, no IME) | Compiled | Compiled |
+| IME composition and placement    | Partial (placement tested, real input method not) | No | No | No | No |
+| Raw mouse motion                 | Tested  | No       | No      | No       | No      |
+| Touch                            | Partial (down and move tested) | No | No | No | No |
+| Monitors and current monitor     | Tested  | Compiled | Partial (one screen) | No | Partial (one screen) |
+| Theme (light or dark)            | Tested  | No       | No      | No       | Compiled |
+| Cursor visibility                | Tested  | Compiled | Compiled| No       | Compiled|
+| Cursor grab                      | Tested (confine) | No | Compiled | No | Partial (lock only) |
+| Window icon                      | Tested  | No       | Compiled| No       | No      |
+| Size limits, resizable           | Partial (resizable tested; limits not) | Compiled | Compiled | Partial | No |
+| Maximize and minimize            | Tested  | Compiled | Compiled| Partial  | No      |
+| Decorations and fullscreen       | Tested  | Compiled | Compiled| Partial  | No      |
+| Always on top                    | Tested  | Compiled | Compiled| No       | No      |
+| File drop                        | Partial (drop tested by chunking only; no hover) | No | No | No | No |
+| Cross-thread wake (`EventLoopProxy`) | Tested | No    | Compiled | Compiled | No   |
+| Menu (Quit, Cmd+Q)               | No      | Compiled | No      | No       | No      |
 
 ## Crates in this workspace
 
@@ -121,6 +149,7 @@ deliver committed text through `ImeEvent::Commit`.
 | `tpt-window-gamepad`     | Optional gamepad input over `gilrs`. Not part of the windowing layer. |
 | `tpt-window-archon`      | Capability bridge to tpt-archon: scope mapping, signed input events and a gated router. Works without tpt-archon. |
 | `tpt-window-shm`         | Shared-memory transport for the display protocol (Windows). |
+| `tpt-window-winit-compat` | A winit 0.30 style `ApplicationHandler` and `run_app` over tpt-window's `step` loop, for migrating winit apps. |
 | `tpt-window-bench`       | Benchmark against winit 0.30 on the same loop. Not published. |
 
 Each crate has its own README and CHANGELOG.
