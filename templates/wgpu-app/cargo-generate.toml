@@ -1,0 +1,3 @@
+[template]
+description = "A window with a wgpu surface that clears to a colour each frame"
+ignore = ["target"]

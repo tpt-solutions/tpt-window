@@ -1,0 +1,42 @@
+[package]
+name = "tpt-window-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ed25519-dalek = "2"
+tpt-window-core = { path = "../tpt-window-core" }
+tpt-window-archon = { path = "../tpt-window-archon" }
+
+# A separate workspace: the fuzz targets build with the nightly toolchain, apart from the main one.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "codec_decode"
+path = "fuzz_targets/codec_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "protocol_decode"
+path = "fuzz_targets/protocol_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "frame_ring"
+path = "fuzz_targets/frame_ring.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "session_log_verify"
+path = "fuzz_targets/session_log_verify.rs"
+test = false
+doc = false

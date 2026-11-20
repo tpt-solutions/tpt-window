@@ -1,0 +1,6 @@
+[template]
+description = "A window and a loop: the smallest tpt-window program"
+ignore = ["target"]
+
+[placeholders]
+# The crate name is taken from the project name; nothing else is asked.

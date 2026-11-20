@@ -1,0 +1,3 @@
+[template]
+description = "Tests for window-driven logic that run without a display"
+ignore = ["target"]

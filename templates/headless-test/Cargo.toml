@@ -1,0 +1,11 @@
+[package]
+name = "{{project-name}}"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[dependencies]
+tpt-window-core = { git = "https://github.com/tpt-solutions/tpt-window" }
+
+[dev-dependencies]
+tpt-window-test-utils = { git = "https://github.com/tpt-solutions/tpt-window" }

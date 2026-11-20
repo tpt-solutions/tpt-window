@@ -1,0 +1,3 @@
+[template]
+description = "A web page with a tpt-window loop driven from requestAnimationFrame (build with wasm-pack or trunk)"
+ignore = ["target"]
