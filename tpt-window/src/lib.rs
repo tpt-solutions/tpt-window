@@ -42,11 +42,12 @@
 use std::time::Duration;
 
 pub use tpt_window_core::{
-    CapabilityToken, DEFAULT_CAPACITY, DisplayScope, ElementState, Event, EventLoop,
-    EventLoopBackend, EventQueue, EventSink, EventStatus, GamepadId, ImeEvent, ImeText, InlineText,
-    InputScope, KeyCode, LogicalPosition, LogicalSize, ModifiersState, MouseButton,
-    MouseScrollDelta, OverflowPolicy, PhysicalKey, PhysicalPosition, PhysicalSize, PollStatus,
-    RawDisplayHandle, RawWindowHandle, RingBuffer, SharedWindowState, SurfaceHandle, TouchEvent,
+    CapabilityToken, CursorGrab, DEFAULT_CAPACITY, DisplayScope, ElementState, Event, EventLoop,
+    EventLoopBackend, EventLoopProxy, EventQueue, EventSink, EventStatus, GamepadId, Icon,
+    IconError, ImeEvent, ImeText, InlineText, InputScope, KeyCode, LogicalPosition, LogicalSize,
+    ModifiersState, MonitorInfo, MouseButton, MouseScrollDelta, OverflowPolicy, PathAssembler,
+    PhysicalKey, PhysicalPosition, PhysicalSize, PollStatus, Position, RawDisplayHandle,
+    RawWindowHandle, RingBuffer, SharedWindowState, Size, SurfaceHandle, Theme, TouchEvent,
     TouchPhase, Window, WindowAttributes, WindowBackend, WindowBuilder, WindowCommand, WindowError,
     WindowEvent, WindowId, WindowScope, WindowState,
 };
