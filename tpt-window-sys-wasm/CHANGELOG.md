@@ -16,6 +16,8 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - Browser check harness in `browser-check/`: runs the backend in Chromium through
   Playwright and checks pointer, wheel, keyboard, committed text and canvas resize.
   It is not part of the workspace and is not run in CI.
+- Window state, cursor, icon, monitor, theme and proxy support from the expanded core API.
+  Compile-checked; the browser check covers input and resize only.
 
 ### Notes
 - `wait` behaves like `poll`, because a browser cannot block. Callers drive the

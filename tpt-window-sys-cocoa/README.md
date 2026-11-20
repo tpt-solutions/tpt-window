@@ -26,6 +26,9 @@ This crate compiles only for macOS. On other platforms it is empty.
 - **Cursor.** A tracking area on the content view reports `CursorEntered` and
   `CursorLeft`.
 
+- **Setters.** Window setters are applied on poll, as on the other backends. Compile-checked
+  only.
+
 ## Known gaps
 
 - **No IME.** Composition (`ImeEvent::Preedit`) is not started for Cocoa.

@@ -18,6 +18,7 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
   and `CursorLeft`.
 - `tests/real_window.rs` with a custom `main` (`harness = false`), run on the macOS
   CI runner.
+- Window setters are applied on poll, as on the other backends. Compile-checked only.
 
 ### Known gaps
 - No IME composition.

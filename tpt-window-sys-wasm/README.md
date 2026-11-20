@@ -41,6 +41,8 @@ blocking `loop`. The core crate uses `web-time` on this target, because
   not checked.
 - **No IME composition.** Only committed text is delivered.
 - Compile- and clippy-checked for `wasm32-unknown-unknown` in CI.
+- Window state, cursor, icon, monitor, theme and proxy follow the expanded core API. These
+  are compile-checked; the browser check does not cover them yet.
 
 ## Testing
 
