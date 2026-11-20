@@ -101,3 +101,107 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # The four templates in templates/ must build against this checkout. The script points their git
+  # dependencies at the local crates, so this checks the templates as they are, not a release.
+  templates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Linux system libraries (xkbcommon for Wayland, libudev for gilrs)
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libudev-dev
+      - run: python3 scripts/check_templates.py
+
+  # Examples open real windows, so they run on a Windows runner, which has a desktop session.
+  # Each runs for a few seconds and must exit cleanly.
+  examples:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run the windowing examples
+        shell: bash
+        env:
+          TPT_EXAMPLE_SECONDS: "2"
+        run: |
+          for ex in hello_window hello_run event_dump input_state multi_window file_drop; do
+            cargo run -p tpt-window --example "$ex"
+          done
+          cargo run -p tpt-window --example record_replay -- record "$RUNNER_TEMP/session.tptrec" 2
+          cargo run -p tpt-window --example record_replay -- replay "$RUNNER_TEMP/session.tptrec"
+          cargo run -p tpt-window-test-utils --example headless_test
+
+  # Undefined-behaviour checks on the pure-Rust core: the ring, the codec and the channel.
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - run: cargo +nightly miri setup
+      - run: cargo +nightly miri test -p tpt-window-core --lib
+
+  # Line coverage for the crates with the most logic. Reported to the job log; no gate yet.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Linux system libraries (xkbcommon for Wayland, libudev for gilrs)
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libudev-dev
+      - run: cargo llvm-cov -p tpt-window-core -p tpt-window-archon -p tpt-window-test-utils --summary-only
+
+  # Public-API compatibility against the first commit, for the crates that existed there.
+  semver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: tpt-window-core
+          baseline-rev: c26e9ee
+
+  # Drives the wasm harness in a real Chromium and checks the events the web backend reports.
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: browser-actions/setup-chrome@v1
+        id: chrome
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Serve the harness and run the check
+        working-directory: tpt-window-sys-wasm/browser-check
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          (cd www && python3 -m http.server 8123 >/dev/null 2>&1 &)
+          npm ci
+          npm run check
+
+  # Fuzzing: each target runs for a minute on the nightly toolchain. Crashes fail the job.
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [codec_decode, protocol_decode, frame_ring, session_log_verify]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@cargo-fuzz
+      - run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60
+        working-directory: fuzz
