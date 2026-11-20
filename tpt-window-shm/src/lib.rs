@@ -13,6 +13,8 @@
 //! A bare name is kept in the session's `Local\` namespace:
 //!
 //! ```no_run
+//! # #[cfg(windows)]
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use tpt_window_core::channel::FrameRing;
 //! use tpt_window_shm::SharedMemory;
 //!
@@ -22,7 +24,10 @@
 //!
 //! // Process B: open the same name with the same size.
 //! let peer = FrameRing::new(SharedMemory::open("tpt-display-0", 64 * 1024)?)?;
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! # Ok(())
+//! # }
+//! # #[cfg(not(windows))]
+//! # fn main() {}
 //! ```
 #![cfg(windows)]
 #![warn(missing_docs)]
