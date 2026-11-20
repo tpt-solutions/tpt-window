@@ -12,6 +12,7 @@ members = [
     "tpt-window-archon",
     "tpt-window-test-utils",
     "tpt-window-bench",
+    "tpt-window-shm",
 ]
 
 [workspace.package]

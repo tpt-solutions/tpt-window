@@ -1,0 +1,16 @@
+[package]
+name = "tpt-window-shm"
+description = "tpt-window-shm: shared-memory transport for the tpt-window display protocol (Windows)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["shared-memory", "ipc", "windowing", "protocol", "windows"]
+categories = ["os::windows-apis", "gui"]
+
+[target.'cfg(windows)'.dependencies]
+tpt-window-core = { workspace = true }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Memory"] }
