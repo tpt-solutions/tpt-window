@@ -7,7 +7,7 @@
 //! the same name, one creating it and the other opening it.
 //!
 //! This crate holds the unsafe code for the transport, and core stays safe. Windows only.
-//! Dropping a [`SharedMemory`] unmaps its view and closes its handle.
+//! Dropping a `SharedMemory` unmaps its view and closes its handle.
 //!
 //! The creating process makes the mapping, and the other process opens it by the same name.
 //! A bare name is kept in the session's `Local\` namespace:
