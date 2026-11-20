@@ -31,12 +31,13 @@ use raw_window_handle::{
 };
 use tpt_window_core::*;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, CreateBitmap, DeleteObject};
 use windows_sys::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient, ValidateRect};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::INFINITE;
+use windows_sys::Win32::System::Threading::{GetCurrentThreadId, INFINITE};
 use windows_sys::Win32::UI::HiDpi::{
-    AdjustWindowRectExForDpi, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem,
-    GetDpiForWindow, SetProcessDpiAwarenessContext,
+    AdjustWindowRectExForDpi, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor,
+    GetDpiForSystem, GetDpiForWindow, MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::Input::Ime::{
     CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, GCS_COMPSTR,
@@ -55,6 +56,7 @@ use windows_sys::Win32::UI::Input::{
     GetRawInputData, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK,
     RIDEV_REMOVE, RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
+use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 /// Not in the enabled windows-sys feature set; value from winuser.h.
@@ -63,20 +65,71 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_TOUCH: u32 = 0x0240;
 
 /// Current IME composition string, or empty when there is none.
-fn composition_text(hwnd: HWND) -> String {
+/// Longest composition read, in UTF-16 units. Longer compositions are cut to this length.
+const COMPOSITION_UNITS: usize = 256;
+
+/// Text held in a fixed buffer, so reading a composition does not allocate.
+struct StackText {
+    buf: [u8; COMPOSITION_UNITS * 4],
+    len: usize,
+}
+
+impl StackText {
+    fn new() -> Self {
+        Self {
+            buf: [0; COMPOSITION_UNITS * 4],
+            len: 0,
+        }
+    }
+
+    /// Appends `c` if it fits; returns false (and appends nothing) when it does not.
+    fn push(&mut self, c: char) -> bool {
+        let mut utf8 = [0_u8; 4];
+        let encoded = c.encode_utf8(&mut utf8);
+        if self.len + encoded.len() > self.buf.len() {
+            return false;
+        }
+        self.buf[self.len..self.len + encoded.len()].copy_from_slice(encoded.as_bytes());
+        self.len += encoded.len();
+        true
+    }
+
+    fn as_str(&self) -> &str {
+        // Only whole UTF-8 sequences are ever appended by `push`, so this always succeeds.
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+}
+
+/// Decodes UTF-16 composition units into `out`. Unpaired surrogates become U+FFFD.
+fn decode_units(units: &[u16], out: &mut StackText) {
+    for c in char::decode_utf16(units.iter().copied()) {
+        if !out.push(c.unwrap_or('\u{FFFD}')) {
+            break;
+        }
+    }
+}
+
+fn composition_text(hwnd: HWND) -> StackText {
+    let mut text = StackText::new();
     // SAFETY: the context is released before returning.
     let himc = unsafe { ImmGetContext(hwnd) };
     if himc.is_null() {
-        return String::new();
+        return text;
     }
     let bytes = unsafe { ImmGetCompositionStringW(himc, GCS_COMPSTR, core::ptr::null_mut(), 0) };
-    let mut text = String::new();
     if bytes > 0 {
-        let mut units = vec![0_u16; bytes as usize / 2];
+        let mut units = [0_u16; COMPOSITION_UNITS];
+        let units_len = (bytes as usize / 2).min(COMPOSITION_UNITS);
+        // SAFETY: the buffer holds `units_len` units, and the byte count passed matches it.
         unsafe {
-            ImmGetCompositionStringW(himc, GCS_COMPSTR, units.as_mut_ptr().cast(), bytes as u32)
+            ImmGetCompositionStringW(
+                himc,
+                GCS_COMPSTR,
+                units.as_mut_ptr().cast(),
+                (units_len * 2) as u32,
+            )
         };
-        text = String::from_utf16_lossy(&units);
+        decode_units(&units[..units_len], &mut text);
     }
     unsafe { ImmReleaseContext(hwnd, himc) };
     text
@@ -148,14 +201,24 @@ struct WindowData {
     commands: Mutex<VecDeque<WindowCommand>>,
     limits: Mutex<Limits>,
     cursor_inside: AtomicBool,
+    /// Whether the pointer image is shown over the client area.
+    cursor_visible: AtomicBool,
     buttons_down: AtomicU8,
     /// Keys and buttons currently held, so focus loss can release them. Without this a key
     /// held through Alt-Tab stays down for the application.
     held_keys: Mutex<Vec<(u32, KeyCode, PhysicalKey)>>,
     held_buttons: Mutex<Vec<MouseButton>>,
     minimized: AtomicBool,
+    /// Style and outer rectangle to return to when leaving fullscreen.
+    fullscreen_restore: Mutex<Option<(u32, RECT)>>,
     /// Last modifier state reported, so `ModifiersChanged` is sent only on a change.
     modifiers: AtomicU8,
+    /// Last theme reported (see `theme_bits`), so `ThemeChanged` is sent only on a change.
+    theme: AtomicU8,
+    /// Pointer grab: 0 none, 1 confined, 2 locked (see `grab_bits`).
+    grab: AtomicU8,
+    /// The window icon's `HICON` as an integer, or 0. Destroyed when replaced or on destroy.
+    icon: AtomicIsize,
     high_surrogate: AtomicU16,
     // Last reported client size, to avoid duplicate Resized events.
     last_w: AtomicI32,
@@ -426,6 +489,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_NCDESTROY => {
             // Give up raw mouse input if this window had it, so the next window gets it.
             release_raw_mouse_if_owner(hwnd);
+            unsafe { ClipCursor(null()) };
+            let icon = d.icon.swap(0, Ordering::Relaxed);
+            if icon != 0 {
+                unsafe { DestroyIcon(icon as HICON) };
+            }
             let p = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) } as *const WindowData;
             // SAFETY: balances the Arc::into_raw in create_window.
             drop(unsafe { Arc::from_raw(p) });
@@ -503,6 +571,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             d.state.update(|s| s.focused = f);
             if !f {
                 release_held_input(id, d);
+                // A clip is lost with focus; it is applied again on the next focus gain.
+                unsafe { ClipCursor(null()) };
+            } else {
+                apply_clip(hwnd, d.grab.load(Ordering::Relaxed));
             }
             push_event(id, WindowEvent::Focused(f));
             return 0;
@@ -626,7 +698,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // Composition text is reported as Preedit. Committed text is left to
             // DefWindowProc, which sends it as WM_CHAR and reaches the Commit path.
             if lparam as u32 & GCS_COMPSTR != 0 {
-                push_preedit(id, &composition_text(hwnd));
+                push_preedit(id, composition_text(hwnd).as_str());
             }
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         }
@@ -677,6 +749,43 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             unsafe { CloseTouchInputHandle(lparam as _) };
             SCRATCH_TOUCH.with(|s| *s.borrow_mut() = inputs);
             return 0;
+        }
+        WM_DROPFILES => {
+            let drop = wparam as HDROP;
+            // SAFETY: `drop` is the HDROP the system sent for this message; it is released below.
+            let count = unsafe { DragQueryFileW(drop, u32::MAX, null_mut(), 0) };
+            for index in 0..count {
+                let len = unsafe { DragQueryFileW(drop, index, null_mut(), 0) } as usize;
+                let mut units = vec![0_u16; len + 1];
+                let written =
+                    unsafe { DragQueryFileW(drop, index, units.as_mut_ptr(), units.len() as u32) }
+                        as usize;
+                let path = String::from_utf16_lossy(&units[..written.min(len)]);
+                push_path_events(id, &path, |chunk, continued| WindowEvent::FileDropped {
+                    chunk,
+                    continued,
+                });
+            }
+            unsafe { DragFinish(drop) };
+            return 0;
+        }
+        WM_SETTINGCHANGE => {
+            // The theme is a registry value, so re-read it on any settings change, and report
+            // only a real change.
+            let theme = theme_bits(system_theme());
+            if d.theme.swap(theme, Ordering::Relaxed) != theme {
+                if let Some(t) = bits_theme(theme) {
+                    push_event(id, WindowEvent::ThemeChanged(t));
+                }
+            }
+        }
+        WM_SETCURSOR => {
+            // Windows sets the cursor on every mouse move, so hiding it here keeps it hidden.
+            // Only the client area is affected; the frame keeps its normal cursors.
+            if (lparam as u32 & 0xFFFF) == HTCLIENT && pointer_hidden(d) {
+                unsafe { SetCursor(null_mut()) };
+                return 1;
+            }
         }
         WM_MOUSELEAVE => {
             d.cursor_inside.store(false, Ordering::Relaxed);
@@ -976,10 +1085,129 @@ fn apply_command(hwnd: HWND, d: &WindowData, cmd: WindowCommand) {
         WindowCommand::SetMaximized(on) => {
             unsafe { ShowWindow(hwnd, if on { SW_MAXIMIZE } else { SW_RESTORE }) };
         }
+        WindowCommand::SetAlwaysOnTop(on) => {
+            let order = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
+            unsafe {
+                SetWindowPos(
+                    hwnd,
+                    order,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+        }
         WindowCommand::SetMinimized(on) => {
             unsafe { ShowWindow(hwnd, if on { SW_MINIMIZE } else { SW_RESTORE }) };
         }
-        _ => {}
+        WindowCommand::SetDecorations(on) => {
+            // Keep the client area: the frame changes size, so the outer size is recomputed for
+            // the same client size under the new style.
+            let fullscreen = d
+                .fullscreen_restore
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some();
+            if !fullscreen {
+                let client = client_size(hwnd);
+                let (style, ex) = style_of(hwnd);
+                let frame =
+                    WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+                let style = if on {
+                    (style & !WS_POPUP) | frame
+                } else {
+                    (style & !frame) | WS_POPUP
+                };
+                let dpi = unsafe { GetDpiForWindow(hwnd) };
+                let (w, h) = outer_size(client, style, ex, dpi);
+                unsafe {
+                    SetWindowLongW(hwnd, GWL_STYLE, style as i32);
+                    SetWindowPos(
+                        hwnd,
+                        null_mut(),
+                        0,
+                        0,
+                        w,
+                        h,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                    );
+                }
+            }
+        }
+        WindowCommand::SetFullscreen(on) => {
+            let mut saved = d
+                .fullscreen_restore
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match (on, saved.take()) {
+                (true, None) => {
+                    let (style, _) = style_of(hwnd);
+                    let mut rect: RECT = unsafe { core::mem::zeroed() };
+                    unsafe { GetWindowRect(hwnd, &mut rect) };
+                    *saved = Some((style, rect));
+                    if let Some(bounds) = monitor_bounds(hwnd) {
+                        unsafe {
+                            SetWindowLongW(
+                                hwnd,
+                                GWL_STYLE,
+                                (style & !(WS_CAPTION | WS_THICKFRAME) | WS_POPUP) as i32,
+                            );
+                            SetWindowPos(
+                                hwnd,
+                                null_mut(),
+                                bounds.left,
+                                bounds.top,
+                                bounds.right - bounds.left,
+                                bounds.bottom - bounds.top,
+                                SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                            );
+                        }
+                    }
+                }
+                (false, Some((style, rect))) => unsafe {
+                    SetWindowLongW(hwnd, GWL_STYLE, style as i32);
+                    SetWindowPos(
+                        hwnd,
+                        null_mut(),
+                        rect.left,
+                        rect.top,
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                    );
+                },
+                (_, previous) => *saved = previous,
+            }
+        }
+        WindowCommand::SetCursorVisible(visible) => {
+            d.cursor_visible.store(visible, Ordering::Relaxed);
+            apply_pointer_image(d);
+        }
+        WindowCommand::SetCursorGrab(grab) => {
+            let bits = grab_bits(grab);
+            d.grab.store(bits, Ordering::Relaxed);
+            if d.state.snapshot().focused {
+                apply_clip(hwnd, bits);
+            }
+            apply_pointer_image(d);
+        }
+        WindowCommand::SetIcon(icon) => {
+            let new = icon.as_ref().map_or(0, make_hicon);
+            let old = d.icon.swap(new, Ordering::Relaxed);
+            unsafe {
+                SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, new);
+                SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, new);
+            }
+            if old != 0 {
+                unsafe { DestroyIcon(old as HICON) };
+            }
+        }
+        _ => debug_assert!(
+            false,
+            "unhandled WindowCommand: give it an arm in this backend"
+        ),
     }
 }
 
@@ -1101,6 +1329,302 @@ fn register_class() -> Result<(), WindowError> {
 /// Win32 event loop backend. Create with [`new_event_loop`].
 pub struct Win32EventLoop {
     exit: Arc<AtomicBool>,
+    /// The thread that owns the loop. Thread messages posted to it wake a blocked `step`.
+    thread_id: u32,
+}
+
+/// Sends a path as chunks, so a path of any length fits the fixed-size event payload.
+fn push_path_events(window: WindowId, path: &str, make: impl Fn(ImeText, bool) -> WindowEvent) {
+    let mut rest = path;
+    loop {
+        let (chunk, next) = ImeText::take_chunk(rest);
+        let continued = !next.is_empty();
+        push_event(window, make(chunk, continued));
+        if !continued {
+            break;
+        }
+        rest = next;
+    }
+}
+
+/// Describes one display: name, bounds, effective DPI and whether it is primary.
+fn monitor_info(
+    hmon: windows_sys::Win32::Graphics::Gdi::HMONITOR,
+) -> Option<tpt_window_core::MonitorInfo> {
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO, MONITORINFOEXW};
+
+    let mut info: MONITORINFOEXW = unsafe { core::mem::zeroed() };
+    info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+    // SAFETY: the struct is sized as MONITORINFOEXW, which begins with a MONITORINFO.
+    if unsafe {
+        GetMonitorInfoW(
+            hmon,
+            (&mut info as *mut MONITORINFOEXW).cast::<MONITORINFO>(),
+        )
+    } == 0
+    {
+        return None;
+    }
+    let (mut dpi_x, mut dpi_y) = (0_u32, 0_u32);
+    // SAFETY: both out-pointers are valid locals.
+    unsafe { GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
+    let r = info.monitorInfo.rcMonitor;
+    let len = info
+        .szDevice
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(info.szDevice.len());
+    let name = String::from_utf16_lossy(&info.szDevice[..len]);
+    Some(tpt_window_core::MonitorInfo {
+        name: (!name.is_empty()).then_some(name),
+        position: PhysicalPosition::new(r.left, r.top),
+        size: PhysicalSize::new(
+            (r.right - r.left).max(0) as u32,
+            (r.bottom - r.top).max(0) as u32,
+        ),
+        scale_factor: f64::from(dpi_x.max(96)) / 96.0,
+        primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
+    })
+}
+
+/// The display a window is mostly on, or the nearest one if it is off every display.
+fn window_monitor(hwnd: HWND) -> Option<tpt_window_core::MonitorInfo> {
+    use windows_sys::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
+    // SAFETY: a plain query on a window handle this crate owns.
+    let hmon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if hmon.is_null() {
+        None
+    } else {
+        monitor_info(hmon)
+    }
+}
+
+/// Encodes a grab for the atomic: 0 none, 1 confined, 2 locked.
+fn grab_bits(grab: CursorGrab) -> u8 {
+    match grab {
+        CursorGrab::None => 0,
+        CursorGrab::Confined => 1,
+        CursorGrab::Locked => 2,
+    }
+}
+
+/// Whether the pointer image is hidden over the client area: hidden by the application, or
+/// locked by a grab.
+fn pointer_hidden(d: &WindowData) -> bool {
+    !d.cursor_visible.load(Ordering::Relaxed) || d.grab.load(Ordering::Relaxed) == 2
+}
+
+/// Shows the arrow or hides the pointer image now, if the pointer is over the window. Otherwise
+/// the next `WM_SETCURSOR` applies it.
+fn apply_pointer_image(d: &WindowData) {
+    if d.cursor_inside.load(Ordering::Relaxed) {
+        let image = if pointer_hidden(d) {
+            null_mut()
+        } else {
+            unsafe { LoadCursorW(null_mut(), IDC_ARROW) }
+        };
+        unsafe { SetCursor(image) };
+    }
+}
+
+/// Confines the pointer to the client area (`bits` 1 or 2), or releases it (0).
+fn apply_clip(hwnd: HWND, bits: u8) {
+    if bits == 0 {
+        unsafe { ClipCursor(null()) };
+        return;
+    }
+    let mut client = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    unsafe { GetClientRect(hwnd, &mut client) };
+    let mut top_left = POINT {
+        x: client.left,
+        y: client.top,
+    };
+    let mut corner = POINT {
+        x: client.right,
+        y: client.bottom,
+    };
+    unsafe {
+        ClientToScreen(hwnd, &mut top_left);
+        ClientToScreen(hwnd, &mut corner);
+    }
+    let rect = RECT {
+        left: top_left.x,
+        top: top_left.y,
+        right: corner.x,
+        bottom: corner.y,
+    };
+    unsafe { ClipCursor(&rect) };
+}
+
+/// Builds an icon from straight RGBA pixels. The caller owns the returned handle, as an integer
+/// (0 on failure), and destroys it.
+fn make_hicon(icon: &tpt_window_core::Icon) -> isize {
+    let (w, h) = (icon.width() as i32, icon.height() as i32);
+    // GDI wants blue, green, red, alpha.
+    let mut bgra = Vec::with_capacity(icon.rgba().len());
+    for px in icon.rgba().chunks_exact(4) {
+        bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+    }
+    // SAFETY: the bit buffer is w*h*4 bytes; the mask has no set bits, so the alpha channel
+    // decides transparency. Both bitmaps are deleted after the icon is made.
+    unsafe {
+        let color = CreateBitmap(w, h, 1, 32, bgra.as_ptr().cast());
+        let mask = CreateBitmap(w, h, 1, 1, null());
+        let info = ICONINFO {
+            fIcon: 1,
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: mask,
+            hbmColor: color,
+        };
+        let hicon = CreateIconIndirect(&info);
+        DeleteObject(color);
+        DeleteObject(mask);
+        hicon as isize
+    }
+}
+
+/// The effective DPI of the display under a physical point, if there is one.
+fn dpi_at_point(p: PhysicalPosition<i32>) -> Option<u32> {
+    use windows_sys::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
+    let pt = POINT { x: p.x, y: p.y };
+    // SAFETY: a plain query with a value point.
+    let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+    if hmon.is_null() {
+        return None;
+    }
+    let (mut dpi_x, mut dpi_y) = (0_u32, 0_u32);
+    // SAFETY: both out-pointers are valid locals.
+    unsafe { GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
+    (dpi_x > 0).then_some(dpi_x)
+}
+
+/// The current light or dark appearance, from the per-user registry value that Windows uses for
+/// apps. `None` when the value cannot be read.
+fn system_theme() -> Option<tpt_window_core::Theme> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    // Stack buffers, not Vecs: this runs inside the window procedure, and a settings broadcast
+    // can arrive during the zero-allocation poll path.
+    fn wide<const N: usize>(text: &str) -> [u16; N] {
+        let mut out = [0_u16; N];
+        for (slot, unit) in out.iter_mut().zip(text.encode_utf16()) {
+            *slot = unit;
+        }
+        out
+    }
+    let key = wide::<96>(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    let name = wide::<32>("AppsUseLightTheme");
+    let mut value: u32 = 0;
+    let mut size = size_of::<u32>() as u32;
+    // SAFETY: the names are NUL-terminated and outlive the call; `value` is a u32 and `size`
+    // says so.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            core::ptr::null_mut(),
+            (&mut value as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    Some(if value == 0 {
+        tpt_window_core::Theme::Dark
+    } else {
+        tpt_window_core::Theme::Light
+    })
+}
+
+/// Encodes a theme for the atomic: 0 light, 1 dark, 2 unknown.
+fn theme_bits(theme: Option<tpt_window_core::Theme>) -> u8 {
+    match theme {
+        Some(tpt_window_core::Theme::Light) => 0,
+        Some(tpt_window_core::Theme::Dark) => 1,
+        None => 2,
+    }
+}
+
+fn bits_theme(bits: u8) -> Option<tpt_window_core::Theme> {
+    match bits {
+        0 => Some(tpt_window_core::Theme::Light),
+        1 => Some(tpt_window_core::Theme::Dark),
+        _ => None,
+    }
+}
+
+/// The full bounds of the display a window is on, in desktop pixels.
+fn monitor_bounds(hwnd: HWND) -> Option<RECT> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    };
+    // SAFETY: a plain query on a window handle this crate owns.
+    let hmon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if hmon.is_null() {
+        return None;
+    }
+    let mut info: MONITORINFO = unsafe { core::mem::zeroed() };
+    info.cbSize = size_of::<MONITORINFO>() as u32;
+    // SAFETY: `info` is a MONITORINFO with its size set.
+    if unsafe { GetMonitorInfoW(hmon, &mut info) } == 0 {
+        return None;
+    }
+    Some(info.rcMonitor)
+}
+
+/// Lists the attached displays with their names, bounds, primary flag and effective DPI.
+fn enumerate_monitors() -> Vec<tpt_window_core::MonitorInfo> {
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC};
+    use windows_sys::core::BOOL;
+
+    unsafe extern "system" fn collect(
+        hmon: windows_sys::Win32::Graphics::Gdi::HMONITOR,
+        _hdc: HDC,
+        _rect: *mut RECT,
+        lparam: LPARAM,
+    ) -> BOOL {
+        // SAFETY: `lparam` is the `&mut Vec` passed to EnumDisplayMonitors below, and it is
+        // only used during that call.
+        let out = unsafe { &mut *(lparam as *mut Vec<tpt_window_core::MonitorInfo>) };
+        if let Some(info) = monitor_info(hmon) {
+            out.push(info);
+        }
+        1
+    }
+
+    let mut out: Vec<tpt_window_core::MonitorInfo> = Vec::new();
+    // SAFETY: a null HDC and clip rect enumerate every display; `collect` only touches `out`
+    // through the pointer given here, which outlives the call.
+    unsafe {
+        EnumDisplayMonitors(
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            Some(collect),
+            (&mut out as *mut Vec<tpt_window_core::MonitorInfo>) as LPARAM,
+        )
+    };
+    out
+}
+
+/// Wakes the loop thread by posting a thread message, which `MsgWaitForMultipleObjects` sees.
+struct ThreadWake {
+    thread_id: u32,
+}
+
+impl tpt_window_core::proxy::Wake for ThreadWake {
+    fn wake(&self) {
+        // A null message does nothing when dispatched; it only ends the wait.
+        // SAFETY: posting to a thread id is valid; a stale id just fails and returns 0.
+        unsafe { PostThreadMessageW(self.thread_id, WM_NULL, 0, 0) };
+    }
 }
 
 /// Creates an [`EventLoop`] backed by Win32. Must be called on the thread that will
@@ -1112,6 +1636,8 @@ pub fn new_event_loop() -> Result<EventLoop, WindowError> {
     PENDING.with(|_| {}); // force the thread-local ring to allocate now, not on the hot path
     Ok(EventLoop::with_backend(Box::new(Win32EventLoop {
         exit: Arc::new(AtomicBool::new(false)),
+        // SAFETY: plain query with no arguments.
+        thread_id: unsafe { GetCurrentThreadId() },
     })))
 }
 
@@ -1163,12 +1689,32 @@ impl EventLoopBackend for Win32EventLoop {
         self.exit.store(true, Ordering::Release);
     }
 
+    fn monitors(&self) -> Vec<tpt_window_core::MonitorInfo> {
+        enumerate_monitors()
+    }
+
+    fn wake_handle(&self) -> Option<Arc<dyn tpt_window_core::proxy::Wake>> {
+        Some(Arc::new(ThreadWake {
+            thread_id: self.thread_id,
+        }))
+    }
+
     fn create_window(
         &self,
         attrs: &WindowAttributes,
     ) -> Result<Arc<dyn WindowBackend>, WindowError> {
-        let dpi = unsafe { GetDpiForSystem() };
-        let scale = f64::from(dpi) / 96.0;
+        // The display the window will open on decides its size. With a position, that is the
+        // display under the position; without one, the system's scale is used.
+        let system_dpi = unsafe { GetDpiForSystem() };
+        let (dpi, scale) = match attrs.position {
+            Some(p) => {
+                let approx = p.to_physical(f64::from(system_dpi) / 96.0);
+                let dpi =
+                    dpi_at_point(PhysicalPosition::new(approx.x, approx.y)).unwrap_or(system_dpi);
+                (dpi, f64::from(dpi) / 96.0)
+            }
+            None => (system_dpi, f64::from(system_dpi) / 96.0),
+        };
 
         let mut style = if attrs.decorations {
             WS_OVERLAPPEDWINDOW
@@ -1208,11 +1754,16 @@ impl EventLoopBackend for Win32EventLoop {
                 max: attrs.max_size,
             }),
             cursor_inside: AtomicBool::new(false),
+            cursor_visible: AtomicBool::new(true),
             buttons_down: AtomicU8::new(0),
             held_keys: Mutex::new(Vec::with_capacity(16)),
             held_buttons: Mutex::new(Vec::with_capacity(5)),
             minimized: AtomicBool::new(false),
+            fullscreen_restore: Mutex::new(None),
             modifiers: AtomicU8::new(0),
+            theme: AtomicU8::new(theme_bits(system_theme())),
+            grab: AtomicU8::new(0),
+            icon: AtomicIsize::new(0),
             high_surrogate: AtomicU16::new(0),
             last_w: AtomicI32::new(0),
             last_h: AtomicI32::new(0),
@@ -1240,6 +1791,8 @@ impl EventLoopBackend for Win32EventLoop {
         if !hwnd.is_null() {
             // Ask for WM_TOUCH from this window's touch input.
             unsafe { RegisterTouchWindow(hwnd, 0) };
+            // Files dropped from Explorer arrive as WM_DROPFILES.
+            unsafe { DragAcceptFiles(hwnd, 1) };
             // Raw mouse input goes to one window per process: the last one created.
             let mouse = RAWINPUTDEVICE {
                 usUsagePage: 0x01,
@@ -1304,6 +1857,18 @@ impl WindowBackend for Win32Window {
         &self.data.state
     }
 
+    fn theme(&self) -> Option<tpt_window_core::Theme> {
+        bits_theme(self.data.theme.load(Ordering::Relaxed))
+    }
+
+    fn current_monitor(&self) -> Option<tpt_window_core::MonitorInfo> {
+        let hwnd = self.hwnd.load(Ordering::Relaxed);
+        if hwnd == 0 {
+            return None;
+        }
+        window_monitor(hwnd as HWND)
+    }
+
     fn raw_window_handle(&self) -> Result<RawWindowHandle, WindowError> {
         let hwnd =
             NonZeroIsize::new(self.hwnd.load(Ordering::Relaxed)).ok_or(WindowError::Destroyed)?;
@@ -1331,6 +1896,28 @@ impl Drop for Win32Window {
     fn drop(&mut self) {
         // DestroyWindow must run on the owning thread; ask it to.
         unsafe { PostMessageW(self.hwnd(), WM_TPT_DESTROY, 0, 0) };
+    }
+}
+
+#[cfg(test)]
+mod composition_tests {
+    use super::{StackText, decode_units};
+
+    #[test]
+    fn composition_units_decode_to_utf8() {
+        let mut out = StackText::new();
+        // "a", then U+1F600 as a surrogate pair, then a lone surrogate that becomes U+FFFD.
+        decode_units(&[0x61, 0xD83D, 0xDE00, 0xD800], &mut out);
+        assert_eq!(out.as_str(), "a\u{1F600}\u{FFFD}");
+    }
+
+    #[test]
+    fn overlong_composition_is_cut_whole_characters_only() {
+        let mut out = StackText::new();
+        let units = vec![0x00E9_u16; 400];
+        decode_units(&units, &mut out);
+        assert!(out.as_str().chars().all(|c| c == '\u{e9}'));
+        assert!(out.as_str().len() <= 1024);
     }
 }
 

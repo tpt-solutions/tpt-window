@@ -69,6 +69,24 @@ impl WebEventLoop {
 }
 
 impl EventLoopBackend for WebEventLoop {
+    fn monitors(&self) -> Vec<tpt_window_core::MonitorInfo> {
+        // The page sees the screen it is on. Its size is in CSS pixels, so it is scaled by the
+        // device pixel ratio to match the physical sizes the windows report.
+        let Some(screen) = web_sys::window().and_then(|w| w.screen().ok()) else {
+            return Vec::new();
+        };
+        let dpr = Ctx::dpr();
+        let w = screen.width().unwrap_or(0).max(0) as f64 * dpr;
+        let h = screen.height().unwrap_or(0).max(0) as f64 * dpr;
+        vec![tpt_window_core::MonitorInfo {
+            name: None,
+            position: PhysicalPosition::new(0, 0),
+            size: PhysicalSize::new(w.round() as u32, h.round() as u32),
+            scale_factor: dpr,
+            primary: true,
+        }]
+    }
+
     fn poll(&mut self, sink: &mut EventSink<'_>) -> PollStatus {
         self.deliver(sink)
     }
@@ -135,9 +153,25 @@ impl EventLoopBackend for WebEventLoop {
             listeners: RefCell::new(Vec::new()),
             modifiers: Cell::new(0),
             observer: RefCell::new(None),
+            theme: RefCell::new(None),
+            last_theme: Cell::new(None),
         });
         install_listeners(&ctx);
         ctx.sync_size();
+        // The page's light or dark preference. It is reported once when the window is made, and
+        // again whenever the browser's setting changes.
+        if let Some(query) = web_sys::window()
+            .and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok().flatten())
+        {
+            ctx.sync_theme(&query);
+            let c = ctx.clone();
+            let q = query.clone();
+            let listener: DomListener =
+                Closure::<dyn FnMut(DomEvent)>::new(move |_e: DomEvent| c.sync_theme(&q));
+            let _ =
+                query.add_event_listener_with_callback("change", listener.as_ref().unchecked_ref());
+            *ctx.theme.borrow_mut() = Some((query, listener));
+        }
         Ok(Arc::new(WebWindow {
             ctx,
             handle: Box::new(JsValue::from(canvas)),
@@ -171,6 +205,10 @@ struct Ctx {
     modifiers: Cell<u8>,
     /// The ResizeObserver and its callback, kept for the same reason.
     observer: RefCell<Option<(web_sys::ResizeObserver, ObserverCallback)>>,
+    /// The `prefers-color-scheme` query and its change listener, removed on drop.
+    theme: RefCell<Option<(web_sys::MediaQueryList, DomListener)>>,
+    /// The last theme reported, so `ThemeChanged` is sent only on a change.
+    last_theme: Cell<Option<Theme>>,
 }
 
 impl Ctx {
@@ -213,6 +251,18 @@ impl Ctx {
         }
         if old.size != size {
             self.push(WindowEvent::Resized(size));
+        }
+    }
+
+    /// Reads the page's light or dark preference and reports it if it changed.
+    fn sync_theme(&self, query: &web_sys::MediaQueryList) {
+        let theme = if query.matches() {
+            Theme::Dark
+        } else {
+            Theme::Light
+        };
+        if self.last_theme.replace(Some(theme)) != Some(theme) {
+            self.push(WindowEvent::ThemeChanged(theme));
         }
     }
 
@@ -540,6 +590,10 @@ impl Drop for WebWindow {
         if let Some((observer, _callback)) = ctx.observer.borrow_mut().take() {
             observer.disconnect();
         }
+        if let Some((query, listener)) = ctx.theme.borrow_mut().take() {
+            let _ = query
+                .remove_event_listener_with_callback("change", listener.as_ref().unchecked_ref());
+        }
         ctx.push(WindowEvent::Destroyed);
     }
 }
@@ -560,6 +614,10 @@ impl WindowBackend for WebWindow {
 
     fn raw_display_handle(&self) -> Result<RawDisplayHandle, WindowError> {
         Ok(RawDisplayHandle::Web(WebDisplayHandle::new()))
+    }
+
+    fn theme(&self) -> Option<Theme> {
+        self.ctx.last_theme.get()
     }
 
     fn send_command(&self, command: WindowCommand) {
@@ -593,8 +651,42 @@ impl WindowBackend for WebWindow {
                 }
             }
             // A page cannot move its canvas relative to the screen.
+            WindowCommand::SetCursorGrab(grab) => {
+                // Pointer lock is the browser's version of a locked grab. A browser cannot
+                // confine the pointer to the page, so `Confined` has no effect here.
+                match grab {
+                    CursorGrab::Locked => ctx.canvas.request_pointer_lock(),
+                    CursorGrab::None => {
+                        if let Some(d) = web_sys::window().and_then(|w| w.document()) {
+                            d.exit_pointer_lock();
+                        }
+                    }
+                    CursorGrab::Confined => {}
+                }
+            }
+            // The page's icon is its favicon, which is not set from here.
+            WindowCommand::SetIcon(_) => {}
+            WindowCommand::SetCursorVisible(visible) => {
+                let _ = ctx
+                    .canvas
+                    .style()
+                    .set_property("cursor", if visible { "auto" } else { "none" });
+            }
             WindowCommand::SetPosition(_) => {}
-            _ => {}
+            // Not supported on the web; the command is accepted and has no effect.
+            WindowCommand::SetImeCursorArea { .. }
+            | WindowCommand::SetMinSize(..)
+            | WindowCommand::SetMaxSize(..)
+            | WindowCommand::SetResizable(..)
+            | WindowCommand::SetMaximized(..)
+            | WindowCommand::SetMinimized(..)
+            | WindowCommand::SetDecorations(..)
+            | WindowCommand::SetFullscreen(..)
+            | WindowCommand::SetAlwaysOnTop(..) => {}
+            _ => debug_assert!(
+                false,
+                "unhandled WindowCommand: give it an arm in this backend"
+            ),
         }
     }
 }

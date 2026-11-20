@@ -39,7 +39,9 @@ use sctk::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
 use sctk::seat::{Capability, SeatHandler, SeatState};
 use sctk::shell::WaylandSurface;
 use sctk::shell::xdg::XdgShell;
-use sctk::shell::xdg::window::{Window, WindowConfigure, WindowDecorations, WindowHandler};
+use sctk::shell::xdg::window::{
+    DecorationMode, Window, WindowConfigure, WindowDecorations, WindowHandler,
+};
 use sctk::{
     delegate_compositor, delegate_keyboard, delegate_output, delegate_pointer, delegate_registry,
     delegate_seat, delegate_xdg_shell, delegate_xdg_window, registry_handlers,
@@ -134,13 +136,16 @@ impl WaylandState {
         let Some(id) = self.keyboard_focus else {
             return;
         };
-        let code = key_from_xkb(event.raw_code);
+        let physical = key_from_xkb(event.raw_code);
+        // sctk reports the keysym with Shift applied, so the fallback maps shifted symbols to their keys.
+        let key_code = tpt_window_core::keymap::key_from_shifted_keysym(event.keysym.raw())
+            .unwrap_or(KeyCode::Unidentified);
         self.push(
             id,
             WindowEvent::KeyboardInput {
                 state: ElementState::Pressed,
-                key_code: code,
-                physical_key: PhysicalKey::Code(code),
+                key_code,
+                physical_key: PhysicalKey::Code(physical),
             },
         );
         if let Some(text) = event.utf8 {
@@ -185,12 +190,25 @@ impl CompositorHandler for WaylandState {
             return;
         };
         let rec = &mut self.windows[i];
+        // Keep the logical size: the physical size follows the new factor.
+        let old_scale = f64::from(rec.scale.max(1));
+        let logical = (
+            (f64::from(rec.size.width) / old_scale).round() as u32,
+            (f64::from(rec.size.height) / old_scale).round() as u32,
+        );
         rec.scale = new_factor;
-        let size = rec.size;
+        let size = PhysicalSize::new(
+            logical.0 * new_factor.max(1) as u32,
+            logical.1 * new_factor.max(1) as u32,
+        );
+        rec.size = size;
+        // Buffers must be rendered at the new scale, or the image is the wrong size.
+        rec.window.wl_surface().set_buffer_scale(new_factor.max(1));
         let id = rec.data.id;
-        rec.data
-            .state
-            .update(|s| s.scale_factor = f64::from(new_factor));
+        rec.data.state.update(|s| {
+            s.scale_factor = f64::from(new_factor);
+            s.size = size;
+        });
         self.push(
             id,
             WindowEvent::ScaleFactorChanged {
@@ -312,8 +330,14 @@ impl SeatHandler for WaylandState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _seat: wl_seat::WlSeat,
-        _capability: Capability,
+        capability: Capability,
     ) {
+        // Dropping the object releases it on the compositor side.
+        match capability {
+            Capability::Keyboard => self.keyboard = None,
+            Capability::Pointer => self.pointer = None,
+            _ => {}
+        }
     }
 
     fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {
@@ -383,13 +407,16 @@ impl KeyboardHandler for WaylandState {
         let Some(id) = self.keyboard_focus else {
             return;
         };
-        let code = key_from_xkb(event.raw_code);
+        let physical = key_from_xkb(event.raw_code);
+        // sctk reports the keysym with Shift applied, so the fallback maps shifted symbols to their keys.
+        let key_code = tpt_window_core::keymap::key_from_shifted_keysym(event.keysym.raw())
+            .unwrap_or(KeyCode::Unidentified);
         self.push(
             id,
             WindowEvent::KeyboardInput {
                 state: ElementState::Released,
-                key_code: code,
-                physical_key: PhysicalKey::Code(code),
+                key_code,
+                physical_key: PhysicalKey::Code(physical),
             },
         );
     }
@@ -436,6 +463,7 @@ impl PointerHandler for WaylandState {
             match ev.kind {
                 PointerEventKind::Enter { .. } => {
                     self.pointer_over = Some((id, x, y));
+                    self.push(id, WindowEvent::CursorEntered);
                     self.push(
                         id,
                         WindowEvent::CursorMoved {
@@ -481,16 +509,17 @@ impl PointerHandler for WaylandState {
                     vertical,
                     ..
                 } => {
-                    // Wayland reports scrolling away from the user as positive; tpt-window
-                    // reports wheel-up as positive, so the sign is flipped.
+                    // Wayland reports scrolling down and right as positive. tpt-window reports
+                    // wheel-up as positive (as Win32 does), so only the vertical axis is flipped.
+                    // Horizontal is positive to the right on both sides, so it is not.
                     let delta = if vertical.discrete != 0 || horizontal.discrete != 0 {
                         MouseScrollDelta::LineDelta {
-                            x: -(horizontal.discrete as f32),
+                            x: horizontal.discrete as f32,
                             y: -(vertical.discrete as f32),
                         }
                     } else {
                         MouseScrollDelta::PixelDelta {
-                            x: -horizontal.absolute * scale,
+                            x: horizontal.absolute * scale,
                             y: -vertical.absolute * scale,
                         }
                     };
@@ -578,6 +607,8 @@ delegate_registry!(WaylandState);
 /// The Wayland event loop.
 pub struct WaylandEventLoop {
     calloop: CalloopLoop<'static, WaylandState>,
+    /// Wakes `dispatch` from another thread; see `wake_handle`.
+    ping: sctk::reexports::calloop::ping::Ping,
     state: std::cell::RefCell<WaylandState>,
     conn: Connection,
     qh: QueueHandle<WaylandState>,
@@ -617,8 +648,16 @@ pub fn new_event_loop() -> Result<EventLoop, WindowError> {
     WaylandSource::new(conn.clone(), event_queue)
         .insert(calloop.handle())
         .map_err(|e| WindowError::Os(e.to_string()))?;
+    // A ping source wakes the loop from another thread through the same poll as the display.
+    let (ping, ping_source) =
+        sctk::reexports::calloop::ping::make_ping().map_err(|e| WindowError::Os(e.to_string()))?;
+    calloop
+        .handle()
+        .insert_source(ping_source, |(), _, _| {})
+        .map_err(|e| WindowError::Os(e.to_string()))?;
     Ok(EventLoop::with_backend(Box::new(WaylandEventLoop {
         calloop,
+        ping,
         state: std::cell::RefCell::new(state),
         conn,
         qh,
@@ -630,9 +669,15 @@ impl WaylandEventLoop {
     /// Dispatches pending Wayland events, blocking up to `timeout` if none are queued.
     fn dispatch(&mut self, timeout: Option<Duration>) {
         let mut state = self.state.borrow_mut();
-        let _ = self
+        // A failed dispatch means the compositor connection is gone. Ending the loop reports
+        // that, where discarding the error would look like an idle loop forever.
+        if self
             .calloop
-            .dispatch(timeout.or(Some(Duration::ZERO)), &mut state);
+            .dispatch(timeout.or(Some(Duration::ZERO)), &mut state)
+            .is_err()
+        {
+            self.exit.store(true, Ordering::Release);
+        }
         // Commands from handles, then removal of windows whose last handle dropped.
         for rec in state.windows.iter() {
             let cmds: Vec<WindowCommand> = {
@@ -651,9 +696,33 @@ impl WaylandEventLoop {
                     WindowCommand::SetMaximized(true) => rec.window.set_maximized(),
                     WindowCommand::SetMaximized(false) => rec.window.unset_maximized(),
                     WindowCommand::SetMinimized(true) => rec.window.set_minimized(),
+                    WindowCommand::SetFullscreen(true) => rec.window.set_fullscreen(None),
+                    WindowCommand::SetFullscreen(false) => rec.window.unset_fullscreen(),
+                    // Pointer constraints and window icons are not wired up on Wayland yet.
+                    WindowCommand::SetCursorGrab(_) | WindowCommand::SetIcon(_) => {}
+                    WindowCommand::SetDecorations(on) => {
+                        let mode = if on {
+                            DecorationMode::Server
+                        } else {
+                            DecorationMode::Client
+                        };
+                        rec.window.request_decoration_mode(Some(mode));
+                    }
                     // SetSize, SetPosition, SetVisible, SetResizable, SetMinimized(false)
                     // and RequestRedraw are not expressible in Wayland; see the crate notes.
-                    _ => {}
+                    // Not supported on Wayland; the command is accepted and has no effect.
+                    WindowCommand::SetSize(..)
+                    | WindowCommand::SetPosition(..)
+                    | WindowCommand::SetVisible(..)
+                    | WindowCommand::SetImeCursorArea { .. }
+                    | WindowCommand::RequestRedraw
+                    | WindowCommand::SetResizable(..)
+                    | WindowCommand::SetCursorVisible(..)
+                    | WindowCommand::SetAlwaysOnTop(..) => {}
+                    _ => debug_assert!(
+                        false,
+                        "unhandled WindowCommand: give it an arm in this backend"
+                    ),
                 }
             }
         }
@@ -673,7 +742,9 @@ impl WaylandEventLoop {
                 i += 1;
             }
         }
-        let _ = self.conn.flush();
+        if self.conn.flush().is_err() {
+            self.exit.store(true, Ordering::Release);
+        }
     }
 
     /// Moves queued events into the caller's sink.
@@ -690,7 +761,20 @@ impl WaylandEventLoop {
     }
 }
 
+/// Wakes the loop through its calloop ping source.
+struct PingWake(sctk::reexports::calloop::ping::Ping);
+
+impl tpt_window_core::proxy::Wake for PingWake {
+    fn wake(&self) {
+        self.0.ping();
+    }
+}
+
 impl EventLoopBackend for WaylandEventLoop {
+    fn wake_handle(&self) -> Option<Arc<dyn tpt_window_core::proxy::Wake>> {
+        Some(Arc::new(PingWake(self.ping.clone())))
+    }
+
     fn poll(&mut self, sink: &mut EventSink<'_>) -> PollStatus {
         self.dispatch(None);
         self.deliver(sink)

@@ -6,8 +6,8 @@
 //!   (`MainThreadMarker`). Other threads only queue commands, which are applied
 //!   on the next poll.
 //! - Input is read by pumping `NSEvent`s and translating them, then forwarding each
-//!   event to `NSApplication::sendEvent` so AppKit keeps its normal behaviour. This
-//!   avoids declaring a custom `NSView` subclass.
+//!   event to `NSApplication::sendEvent` so AppKit keeps its normal behaviour. The
+//!   one custom `NSView` subclass only reports `drawRect:` as `RedrawRequested`.
 //! - A window delegate vetoes the close button. The backend reports `CloseRequested`
 //!   and keeps the window open, so the application decides by dropping its window.
 //!   This matches Win32 and Wayland. Compile-checked for macOS only; not yet run on a Mac.
@@ -27,11 +27,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
 use objc2::runtime::ProtocolObject;
-use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
-    NSEventModifierFlags, NSEventType, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSWindow,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSCursor, NSEvent,
+    NSEventMask, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel, NSMenu, NSMenuItem,
+    NSNormalWindowLevel, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
     NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
@@ -58,6 +62,10 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Whether `c` is in the Unicode Private Use Area. AppKit reports arrow, F and navigation
 /// keys as characters from it, so they must not be committed as text.
+/// Whether this process has hidden the pointer. The pointer is one global resource on macOS,
+/// so the state is shared by every window.
+static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
+
 fn is_private_use(c: char) -> bool {
     ('\u{E000}'..='\u{F8FF}').contains(&c)
 }
@@ -102,6 +110,67 @@ impl WindowDelegate {
     }
 }
 
+define_class!(
+    // The content view. AppKit calls `drawRect:` when the view needs painting (after a
+    // `setNeedsDisplay` or an exposure), and that is reported as `RedrawRequested`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "TptContentView"]
+    #[ivars = Cell<u64>]
+    struct ContentView;
+
+    impl ContentView {
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            push_event(WindowId(self.ivars().get()), WindowEvent::RedrawRequested);
+        }
+
+        // Keys reach the view through the responder chain. Handling them here, as nothing,
+        // stops AppKit from playing the error beep for keys no one handles.
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, _event: &NSEvent) {}
+    }
+);
+
+define_class!(
+    // The target of the Quit menu item. Quit asks every window to close, which is reported as
+    // `CloseRequested`; the application then decides, as for the close button. It does not call
+    // `terminate:`, because that would end the process behind the application's back.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "TptMenuTarget"]
+    #[ivars = ()]
+    struct MenuTarget;
+
+    impl MenuTarget {
+        #[unsafe(method(quit:))]
+        fn quit(&self, _sender: Option<&AnyObject>) {
+            WINDOWS.with(|w| {
+                for record in w.borrow().iter() {
+                    if !record.data.destroy_requested.load(Ordering::Acquire) {
+                        push_event(record.data.id, WindowEvent::CloseRequested);
+                    }
+                }
+            });
+        }
+    }
+);
+
+impl MenuTarget {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+impl ContentView {
+    /// Creates a content view covering `frame`, reporting for window `id`.
+    fn new(mtm: MainThreadMarker, id: WindowId, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(Cell::new(id.0));
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
 /// State shared between the main-thread record and the `Window` handle.
 struct WindowData {
     id: WindowId,
@@ -116,6 +185,27 @@ struct WindowData {
 // ---------------------------------------------------------------------------
 // Coordinates
 // ---------------------------------------------------------------------------
+
+/// Describes one `NSScreen` in physical pixels, with a top-left origin. `main_height` is the
+/// primary display's height in points, which AppKit's bottom-left origin is measured from.
+fn screen_info(screen: &NSScreen, main_height: f64, primary: bool) -> tpt_window_core::MonitorInfo {
+    let frame = screen.frame();
+    let scale = screen.backingScaleFactor();
+    let top = main_height - (frame.origin.y + frame.size.height);
+    tpt_window_core::MonitorInfo {
+        name: Some(screen.localizedName().to_string()),
+        position: PhysicalPosition::new(
+            (frame.origin.x * scale).round() as i32,
+            (top * scale).round() as i32,
+        ),
+        size: PhysicalSize::new(
+            (frame.size.width * scale).round() as u32,
+            (frame.size.height * scale).round() as u32,
+        ),
+        scale_factor: scale,
+        primary,
+    }
+}
 
 /// Height of the main screen in points, used to convert AppKit's bottom-left origin
 /// into the top-left origin tpt-window uses.
@@ -160,6 +250,21 @@ fn physical_position(window: &NSWindow, mtm: MainThreadMarker) -> PhysicalPositi
 
 /// Maps a macOS virtual key code to a [`KeyCode`]. Codes name physical positions, so
 /// the result does not depend on the keyboard layout.
+/// The layout meaning of a key event: the character the key types with Shift and the other
+/// modifiers ignored, when that is a key. Keys that type no character (arrows, function keys) and
+/// keys the character table does not know use the key's position, which is the same on every
+/// layout for those keys.
+fn base_key(event: &NSEvent, vk: u16) -> KeyCode {
+    if let Some(chars) = event.charactersIgnoringModifiers() {
+        if let Some(c) = chars.to_string().chars().next() {
+            if let Some(key) = tpt_window_core::keymap::key_from_char(c) {
+                return key;
+            }
+        }
+    }
+    key_from_vk(vk)
+}
+
 fn key_from_vk(vk: u16) -> KeyCode {
     match vk {
         0x00 => KeyCode::A,
@@ -391,13 +496,13 @@ fn translate(record: &Record, event: &NSEvent, mtm: MainThreadMarker) {
         }
         NSEventType::KeyDown => {
             let vk = event.keyCode();
-            let code = key_from_vk(vk);
+            let physical = key_from_vk(vk);
             push_event(
                 id,
                 WindowEvent::KeyboardInput {
                     state: ElementState::Pressed,
-                    key_code: code,
-                    physical_key: PhysicalKey::Code(code),
+                    key_code: base_key(event, vk),
+                    physical_key: PhysicalKey::Code(physical),
                 },
             );
             // Command shortcuts (Cmd+C, Cmd+Q) are not text input.
@@ -412,13 +517,13 @@ fn translate(record: &Record, event: &NSEvent, mtm: MainThreadMarker) {
             }
         }
         NSEventType::KeyUp => {
-            let code = key_from_vk(event.keyCode());
+            let vk = event.keyCode();
             push_event(
                 id,
                 WindowEvent::KeyboardInput {
                     state: ElementState::Released,
-                    key_code: code,
-                    physical_key: PhysicalKey::Code(code),
+                    key_code: base_key(event, vk),
+                    physical_key: PhysicalKey::Code(key_from_vk(vk)),
                 },
             );
         }
@@ -530,6 +635,45 @@ fn sync_record(record: &Record, mtm: MainThreadMarker) {
                     window.setStyleMask(style);
                 }
             }
+            WindowCommand::SetDecorations(on) => {
+                let titled = NSWindowStyleMask::Titled
+                    | NSWindowStyleMask::Closable
+                    | NSWindowStyleMask::Miniaturizable;
+                let mut style = window.styleMask();
+                if on {
+                    style |= titled;
+                } else {
+                    style &= !(titled | NSWindowStyleMask::Resizable);
+                }
+                window.setStyleMask(style);
+            }
+            WindowCommand::SetFullscreen(on) => {
+                // `toggleFullScreen` toggles, so it is called only when the state differs.
+                let now = window.styleMask().0 & NSWindowStyleMask::FullScreen.0 != 0;
+                if now != on {
+                    window.toggleFullScreen(None);
+                }
+            }
+            WindowCommand::SetAlwaysOnTop(on) => {
+                let level = if on {
+                    NSFloatingWindowLevel
+                } else {
+                    NSNormalWindowLevel
+                };
+                window.setLevel(level);
+            }
+            // Not yet supported on macOS; the commands are accepted and have no effect.
+            WindowCommand::SetCursorGrab(_) | WindowCommand::SetIcon(_) => {}
+            WindowCommand::SetCursorVisible(visible) => {
+                // NSCursor hide and unhide nest, so only a real change is sent.
+                if CURSOR_HIDDEN.swap(!visible, Ordering::Relaxed) == visible {
+                    if visible {
+                        NSCursor::unhide();
+                    } else {
+                        NSCursor::hide();
+                    }
+                }
+            }
             WindowCommand::SetMaximized(on) => {
                 // `zoom` toggles, so only call it when the state differs.
                 if window.isZoomed() != on {
@@ -543,7 +687,12 @@ fn sync_record(record: &Record, mtm: MainThreadMarker) {
                     window.deminiaturize(None);
                 }
             }
-            _ => {}
+            // Not supported on macOS; the command is accepted and has no effect.
+            WindowCommand::SetImeCursorArea { .. } => {}
+            _ => debug_assert!(
+                false,
+                "unhandled WindowCommand: give it an arm in this backend"
+            ),
         }
     }
 
@@ -623,6 +772,8 @@ fn reap_windows(mtm: MainThreadMarker) {
 pub struct MacEventLoop {
     exit: Arc<AtomicBool>,
     mtm: MainThreadMarker,
+    /// Keeps the Quit item's target alive; the menu holds it weakly.
+    _menu_target: Retained<MenuTarget>,
 }
 
 /// Creates an [`EventLoop`] backed by AppKit. Must be called on the main thread,
@@ -634,11 +785,30 @@ pub fn new_event_loop() -> Result<EventLoop, WindowError> {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     app.finishLaunching();
+    // A main menu with Quit (Cmd+Q). Without one there is no Quit at all.
+    let menu_target = MenuTarget::new(mtm);
+    let main_menu = NSMenu::new(mtm);
+    let app_item = NSMenuItem::new(mtm);
+    main_menu.addItem(&app_item);
+    let app_menu = NSMenu::new(mtm);
+    let quit = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Quit"),
+            Some(sel!(quit:)),
+            &NSString::from_str("q"),
+        )
+    };
+    unsafe { quit.setTarget(Some(&menu_target)) };
+    app_menu.addItem(&quit);
+    app_item.setSubmenu(Some(&app_menu));
+    app.setMainMenu(Some(&main_menu));
     // Force the thread-local ring to allocate now, not on the hot path.
     PENDING.with(|_| {});
     Ok(EventLoop::with_backend(Box::new(MacEventLoop {
         exit: Arc::new(AtomicBool::new(false)),
         mtm,
+        _menu_target: menu_target,
     })))
 }
 
@@ -723,6 +893,19 @@ impl EventLoopBackend for MacEventLoop {
         self.exit.store(true, Ordering::Release);
     }
 
+    fn monitors(&self) -> Vec<tpt_window_core::MonitorInfo> {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return Vec::new();
+        };
+        let main_height = screen_height(mtm);
+        // AppKit lists the primary display first.
+        NSScreen::screens(mtm)
+            .iter()
+            .enumerate()
+            .map(|(i, screen)| screen_info(&screen, main_height, i == 0))
+            .collect()
+    }
+
     fn create_window(
         &self,
         attrs: &WindowAttributes,
@@ -754,7 +937,7 @@ impl EventLoopBackend for MacEventLoop {
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(&NSString::from_str(&attrs.title));
         if let Some(min) = attrs.min_size {
-            window.setMinSize(NSSize::new(min.width, min.height));
+            window.setContentMinSize(NSSize::new(min.width, min.height));
         }
         if let Some(max) = attrs.max_size {
             window.setMaxSize(NSSize::new(max.width, max.height));
@@ -766,11 +949,19 @@ impl EventLoopBackend for MacEventLoop {
             None => window.center(),
         }
 
+        let id = WindowId(NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        // Replace the default content view with one that reports paint requests. It takes the
+        // old view's frame, so the layout is unchanged.
+        let frame = window
+            .contentView()
+            .ok_or_else(|| WindowError::Os("window has no content view".into()))?
+            .frame();
+        let content = ContentView::new(mtm, id, frame);
+        window.setContentView(Some(&content));
         let view = window
             .contentView()
             .ok_or_else(|| WindowError::Os("window has no content view".into()))?;
         let view_ptr = Retained::as_ptr(&view) as usize;
-        let id = WindowId(NEXT_ID.fetch_add(1, Ordering::Relaxed));
 
         // Enter/exit: the tracking area covers the whole view and follows its size.
         let tracking = unsafe {
@@ -846,6 +1037,24 @@ impl WindowBackend for MacWindow {
 
     fn raw_display_handle(&self) -> Result<RawDisplayHandle, WindowError> {
         Ok(RawDisplayHandle::AppKit(AppKitDisplayHandle::new()))
+    }
+
+    fn current_monitor(&self) -> Option<tpt_window_core::MonitorInfo> {
+        let mtm = MainThreadMarker::new()?;
+        let addr = self.data.view.load(Ordering::Acquire);
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: the address is this window's content view. The window keeps it alive until
+        // destroy, which zeroes the address first, so it is valid for this borrow.
+        let view: &NSView = unsafe { &*(addr as *const NSView) };
+        let screen = view.window()?.screen()?;
+        let screens = NSScreen::screens(mtm);
+        let primary = screens
+            .iter()
+            .next()
+            .is_some_and(|first| std::ptr::eq(&*first, &*screen));
+        Some(screen_info(&screen, screen_height(mtm), primary))
     }
 
     fn send_command(&self, command: WindowCommand) {

@@ -23,6 +23,9 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ffi::{CString, c_char, c_int, c_long, c_ulong, c_void};
+use std::io::{Read, Write};
+use std::os::unix::io::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,7 +33,7 @@ use std::time::Duration;
 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, XlibDisplayHandle, XlibWindowHandle};
 use tpt_window_core::*;
-use x11_dl::xlib::{self, Display, XErrorEvent, XEvent, XKeyEvent, XSizeHints, Xlib};
+use x11_dl::xlib::{self, Display, XColor, XErrorEvent, XEvent, XKeyEvent, XSizeHints, Xlib};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -77,6 +80,34 @@ struct Record {
     modifiers: ModifiersState,
 }
 
+/// Builds an invisible cursor from an empty 8x8 bitmap. The cursor is a server resource, so it
+/// is freed when the connection closes.
+fn blank_cursor(xlib: &Xlib, display: *mut Display) -> c_ulong {
+    let data = [0u8; 8];
+    // SAFETY: the display is open; the bitmap and colours are valid for the calls.
+    unsafe {
+        let root = (xlib.XDefaultRootWindow)(display);
+        let bitmap =
+            (xlib.XCreateBitmapFromData)(display, root, data.as_ptr().cast::<c_char>(), 8, 8);
+        let mut colour: XColor = std::mem::zeroed();
+        let cursor =
+            (xlib.XCreatePixmapCursor)(display, bitmap, bitmap, &mut colour, &mut colour, 0, 0);
+        (xlib.XFreePixmap)(display, bitmap);
+        cursor
+    }
+}
+
+/// The character a keysym stands for. Latin-1 keysyms equal their code points (0x20-0x7E and
+/// 0xA0-0xFF); other Unicode characters are 0x0100_0000 plus the code point. Function, control
+/// and dead keys have no character.
+fn keysym_to_char(keysym: c_ulong) -> Option<char> {
+    match keysym {
+        0x20..=0x7E | 0xA0..=0xFF => char::from_u32(keysym as u32),
+        0x0100_0100..=0x0110_FFFF => char::from_u32((keysym - 0x0100_0000) as u32),
+        _ => None,
+    }
+}
+
 /// Modifier state from an X `state` mask. The bit values are the core protocol's:
 /// Shift 1, Control 4, Mod1 (Alt) 8, Mod4 (Super) 64.
 fn x_modifiers(state: u32) -> ModifiersState {
@@ -92,6 +123,27 @@ fn x_modifiers(state: u32) -> ModifiersState {
 // Backend
 // ---------------------------------------------------------------------------
 
+/// EWMH atoms for window state, interned once when the display opens.
+#[derive(Clone, Copy)]
+struct NetAtoms {
+    state: c_ulong,
+    maximized_horz: c_ulong,
+    maximized_vert: c_ulong,
+    fullscreen: c_ulong,
+    above: c_ulong,
+    icon: c_ulong,
+}
+
+/// Wakes a blocked `wait` by writing a byte to the wake socket.
+struct XWake(Arc<UnixStream>);
+
+impl tpt_window_core::proxy::Wake for XWake {
+    fn wake(&self) {
+        // A full socket already means a wake is pending, so a failed write is harmless.
+        let _ = (&*self.0).write(&[1]);
+    }
+}
+
 /// The X11 event loop.
 pub struct X11EventLoop {
     xlib: Xlib,
@@ -99,8 +151,18 @@ pub struct X11EventLoop {
     screen: c_int,
     scale: f64,
     wm_delete: c_ulong,
+    /// The X error handler in place before this loop installed its own.
+    previous_error_handler: Option<unsafe extern "C" fn(*mut Display, *mut XErrorEvent) -> c_int>,
+    /// Read end of the wake socket, polled alongside the display connection.
+    wake_rx: UnixStream,
+    /// Write end, shared with the wake handle.
+    wake_tx: Arc<UnixStream>,
+    /// A fully transparent cursor, shown in place of the pointer while it is hidden.
+    blank_cursor: c_ulong,
     /// Atom for the Motif hints property, which removes window-manager decorations.
     motif_hints: c_ulong,
+    /// Atoms of the EWMH window-state properties (`_NET_WM_STATE_*`).
+    net: NetAtoms,
     records: RefCell<Vec<Record>>,
     pending: RefCell<EventQueue>,
     exit: Arc<AtomicBool>,
@@ -112,12 +174,12 @@ pub fn new_event_loop() -> Result<EventLoop, WindowError> {
     let xlib = Xlib::open().map_err(|_| WindowError::Unsupported("Xlib is not installed"))?;
     // SAFETY: plain Xlib calls on a freshly opened display, with the error handler
     // installed before any other request is sent.
-    let display = unsafe {
+    let (display, previous_error_handler) = unsafe {
         // Must come before any other Xlib call. The display is shared with other threads
         // (the `Window` handles), and Xlib is not thread-safe unless this is set.
         (xlib.XInitThreads)();
-        (xlib.XSetErrorHandler)(Some(ignore_x_error));
-        (xlib.XOpenDisplay)(ptr::null())
+        let previous = (xlib.XSetErrorHandler)(Some(ignore_x_error));
+        ((xlib.XOpenDisplay)(ptr::null()), previous)
     };
     if display.is_null() {
         return Err(WindowError::NoDisplay(
@@ -125,11 +187,21 @@ pub fn new_event_loop() -> Result<EventLoop, WindowError> {
         ));
     }
     // SAFETY: `display` is valid until XCloseDisplay in Drop.
-    let (screen, wm_delete, motif_hints) = unsafe {
+    let (screen, wm_delete, motif_hints, net) = unsafe {
         let screen = (xlib.XDefaultScreen)(display);
         let atom = (xlib.XInternAtom)(display, c"WM_DELETE_WINDOW".as_ptr(), xlib::False);
         let motif = (xlib.XInternAtom)(display, c"_MOTIF_WM_HINTS".as_ptr(), xlib::False);
-        (screen, atom, motif)
+        let intern =
+            |name: &std::ffi::CStr| (xlib.XInternAtom)(display, name.as_ptr(), xlib::False);
+        let net = NetAtoms {
+            state: intern(c"_NET_WM_STATE"),
+            maximized_horz: intern(c"_NET_WM_STATE_MAXIMIZED_HORZ"),
+            maximized_vert: intern(c"_NET_WM_STATE_MAXIMIZED_VERT"),
+            fullscreen: intern(c"_NET_WM_STATE_FULLSCREEN"),
+            above: intern(c"_NET_WM_STATE_ABOVE"),
+            icon: intern(c"_NET_WM_ICON"),
+        };
+        (screen, atom, motif, net)
     };
     // Force the thread-local ring to allocate now, not on the hot path.
     // SAFETY: the display is open.
@@ -142,6 +214,12 @@ pub fn new_event_loop() -> Result<EventLoop, WindowError> {
         let mut supported: xlib::Bool = xlib::False;
         (xlib.XkbSetDetectableAutoRepeat)(display, xlib::True, &mut supported);
     }
+    let blank_cursor = blank_cursor(&xlib, display);
+    let (wake_rx, wake_tx) = UnixStream::pair().map_err(|e| WindowError::Os(e.to_string()))?;
+    wake_rx
+        .set_nonblocking(true)
+        .and_then(|()| wake_tx.set_nonblocking(true))
+        .map_err(|e| WindowError::Os(e.to_string()))?;
     Ok(EventLoop::with_backend(Box::new(X11EventLoop {
         xlib,
         display,
@@ -149,6 +227,11 @@ pub fn new_event_loop() -> Result<EventLoop, WindowError> {
         scale,
         wm_delete,
         motif_hints,
+        net,
+        blank_cursor,
+        previous_error_handler,
+        wake_rx,
+        wake_tx: Arc::new(wake_tx),
         records: RefCell::new(Vec::new()),
         pending: RefCell::new(new_pending_queue()),
         exit: Arc::new(AtomicBool::new(false)),
@@ -223,6 +306,20 @@ impl X11EventLoop {
         // SAFETY: `ev.type_` tells which union member is initialised.
         let kind = unsafe { ev.type_ };
         match kind {
+            xlib::Expose => {
+                // SAFETY: Expose fills `expose`.
+                let e = unsafe { ev.expose };
+                // The server sends a run of Expose events; act once, on the last of them.
+                if e.count == 0 {
+                    if let Some(i) = self.record_index(e.window) {
+                        let id = self.records.borrow()[i].data.id;
+                        self.pending.borrow_mut().push(Event {
+                            window: id,
+                            event: WindowEvent::RedrawRequested,
+                        });
+                    }
+                }
+            }
             xlib::ConfigureNotify => {
                 // SAFETY: ConfigureNotify fills `configure`.
                 let c = unsafe { ev.configure };
@@ -230,7 +327,11 @@ impl X11EventLoop {
                     return;
                 };
                 let size = PhysicalSize::new(c.width.max(1) as u32, c.height.max(1) as u32);
-                let position = PhysicalPosition::new(c.x, c.y);
+                // Under a reparenting window manager, the event's x and y are relative to the
+                // frame, so the client origin is translated to root coordinates.
+                let position = self
+                    .root_position(c.window)
+                    .unwrap_or(PhysicalPosition::new(c.x, c.y));
                 let rec = &mut self.records.borrow_mut()[i];
                 let id = rec.data.id;
                 let mut out = self.pending.borrow_mut();
@@ -258,8 +359,13 @@ impl X11EventLoop {
                     return;
                 };
                 let id = self.records.borrow()[i].data.id;
-                // X keycodes are evdev codes plus 8 on Linux.
-                let code = key_from_evdev(key.keycode.saturating_sub(8));
+                // X keycodes are evdev codes plus 8 on Linux. The position is the physical key;
+                // the meaning is the unshifted keysym on the current layout.
+                let physical = key_from_evdev(key.keycode.saturating_sub(8));
+                // SAFETY: the event is a key event read from the server; the lookup only reads it.
+                let base_keysym = unsafe { (self.xlib.XLookupKeysym)(&mut key, 0) };
+                let key_code = tpt_window_core::keymap::key_from_keysym(base_keysym as u32)
+                    .unwrap_or(KeyCode::Unidentified);
                 let state = if kind == xlib::KeyPress {
                     ElementState::Pressed
                 } else {
@@ -281,8 +387,8 @@ impl X11EventLoop {
                     window: id,
                     event: WindowEvent::KeyboardInput {
                         state,
-                        key_code: code,
-                        physical_key: PhysicalKey::Code(code),
+                        key_code,
+                        physical_key: PhysicalKey::Code(physical),
                     },
                 });
                 if kind == xlib::KeyPress {
@@ -353,6 +459,10 @@ impl X11EventLoop {
             xlib::EnterNotify | xlib::LeaveNotify => {
                 // SAFETY: crossing events fill `crossing`.
                 let c = unsafe { ev.crossing };
+                // Grab-induced crossings (mode other than NotifyNormal) are not pointer moves.
+                if c.mode != xlib::NotifyNormal {
+                    return;
+                }
                 if let Some(i) = self.record_index(c.window) {
                     let id = self.records.borrow()[i].data.id;
                     let event = if kind == xlib::EnterNotify {
@@ -366,6 +476,10 @@ impl X11EventLoop {
             xlib::FocusIn | xlib::FocusOut => {
                 // SAFETY: focus events fill `focus_change`.
                 let f = unsafe { ev.focus_change };
+                // Focus changes made by a grab are not the user moving focus.
+                if f.mode != xlib::NotifyNormal {
+                    return;
+                }
                 if let Some(i) = self.record_index(f.window) {
                     let focused = kind == xlib::FocusIn;
                     let mut records = self.records.borrow_mut();
@@ -407,21 +521,21 @@ impl X11EventLoop {
     }
 
     /// Text for a key press, from the current keyboard mapping.
+    /// The text a key press types, from its keysym at the shift level. This does not depend on
+    /// the locale's byte encoding, so non-ASCII characters arrive intact. Keys held with Control,
+    /// Alt or Super type no text. Input methods (dead keys, CJK composition) are not used yet.
     fn lookup_text(&self, key: &mut XKeyEvent) -> String {
-        let mut buf = [0_u8; 64];
-        // SAFETY: `buf` is large enough for XLookupString's output; the keysym and
-        // compose status are optional and passed as null.
-        let n = unsafe {
-            (self.xlib.XLookupString)(
-                key,
-                buf.as_mut_ptr() as *mut c_char,
-                buf.len() as c_int,
-                ptr::null_mut(),
-                ptr::null_mut(),
-            )
-        };
-        let n = n.clamp(0, buf.len() as c_int) as usize;
-        String::from_utf8_lossy(&buf[..n]).into_owned()
+        const CONTROL_MASK: u32 = 1 << 2;
+        const MOD1_MASK: u32 = 1 << 3;
+        const MOD4_MASK: u32 = 1 << 6;
+        const SHIFT_MASK: u32 = 1 << 0;
+        if key.state & (CONTROL_MASK | MOD1_MASK | MOD4_MASK) != 0 {
+            return String::new();
+        }
+        let level = c_int::from(key.state & SHIFT_MASK != 0);
+        // SAFETY: the event is a key event read from the server; XLookupKeysym only reads it.
+        let keysym = unsafe { (self.xlib.XLookupKeysym)(key, level) };
+        keysym_to_char(keysym).map(String::from).unwrap_or_default()
     }
 
     /// Applies queued commands, destroys windows whose last handle dropped, and
@@ -496,9 +610,116 @@ impl X11EventLoop {
                         // SAFETY: as above.
                         unsafe { (self.xlib.XMapWindow)(self.display, rec.window) };
                     }
-                    // Maximizing needs the _NET_WM_STATE client message, which is not written yet.
-                    WindowCommand::SetMaximized(_) => {}
-                    _ => {}
+                    WindowCommand::SetMaximized(on) => {
+                        let action = c_long::from(on);
+                        self.send_wm_state(
+                            rec.window,
+                            action,
+                            self.net.maximized_horz,
+                            self.net.maximized_vert,
+                        );
+                    }
+                    WindowCommand::SetFullscreen(on) => {
+                        self.send_wm_state(rec.window, c_long::from(on), self.net.fullscreen, 0);
+                    }
+                    WindowCommand::SetAlwaysOnTop(on) => {
+                        self.send_wm_state(rec.window, c_long::from(on), self.net.above, 0);
+                    }
+                    WindowCommand::SetDecorations(on) => {
+                        self.set_decorations(rec.window, on);
+                    }
+                    WindowCommand::SetCursorVisible(visible) => {
+                        // SAFETY: as above; the blank cursor lives until the display closes.
+                        unsafe {
+                            if visible {
+                                (self.xlib.XUndefineCursor)(self.display, rec.window);
+                            } else {
+                                (self.xlib.XDefineCursor)(
+                                    self.display,
+                                    rec.window,
+                                    self.blank_cursor,
+                                );
+                            }
+                        };
+                    }
+                    // Not supported on X11; the command is accepted and has no effect.
+                    WindowCommand::SetImeCursorArea { .. } => {}
+                    WindowCommand::SetCursorGrab(grab) => {
+                        // SAFETY: the display is open; the window is live (not yet destroyed).
+                        unsafe {
+                            match grab {
+                                CursorGrab::None => {
+                                    (self.xlib.XUngrabPointer)(self.display, xlib::CurrentTime);
+                                }
+                                CursorGrab::Confined | CursorGrab::Locked => {
+                                    let cursor = if grab == CursorGrab::Locked {
+                                        self.blank_cursor
+                                    } else {
+                                        0
+                                    };
+                                    (self.xlib.XGrabPointer)(
+                                        self.display,
+                                        rec.window,
+                                        xlib::True,
+                                        (xlib::ButtonPressMask
+                                            | xlib::ButtonReleaseMask
+                                            | xlib::PointerMotionMask)
+                                            as u32,
+                                        xlib::GrabModeAsync,
+                                        xlib::GrabModeAsync,
+                                        rec.window,
+                                        cursor,
+                                        xlib::CurrentTime,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    WindowCommand::SetIcon(icon) => match icon {
+                        None => {
+                            // SAFETY: as above.
+                            unsafe {
+                                (self.xlib.XDeleteProperty)(
+                                    self.display,
+                                    rec.window,
+                                    self.net.icon,
+                                );
+                            }
+                        }
+                        Some(icon) => {
+                            // _NET_WM_ICON is a list of CARDINALs: width, height, then one ARGB
+                            // word per pixel, read as `long`s in 32-bit format.
+                            let mut data: Vec<c_long> =
+                                Vec::with_capacity(2 + icon.rgba().len() / 4);
+                            data.push(c_long::from(icon.width()));
+                            data.push(c_long::from(icon.height()));
+                            for px in icon.rgba().chunks_exact(4) {
+                                let argb = (u32::from(px[3]) << 24)
+                                    | (u32::from(px[0]) << 16)
+                                    | (u32::from(px[1]) << 8)
+                                    | u32::from(px[2]);
+                                data.push(c_long::from(argb));
+                            }
+                            // SAFETY: `data` lives across the call, and the length is in units
+                            // of the format (32-bit words).
+                            unsafe {
+                                (self.xlib.XChangeProperty)(
+                                    self.display,
+                                    rec.window,
+                                    self.net.icon,
+                                    xlib::XA_CARDINAL,
+                                    32,
+                                    xlib::PropModeReplace,
+                                    data.as_ptr().cast::<std::os::raw::c_uchar>(),
+                                    data.len() as c_int,
+                                );
+                            }
+                        }
+                    },
+                    _ => debug_assert!(
+                        false,
+                        "unhandled WindowCommand: give it an arm in this backend"
+                    ),
                 }
             }
             if rec.data.destroy_requested.load(Ordering::Acquire) {
@@ -556,21 +777,139 @@ impl X11EventLoop {
     }
 
     /// Waits up to `timeout` for the connection to become readable.
+    /// Shows or removes the window-manager frame with the Motif hints. Window managers that read
+    /// the hints remove the frame; the others ignore them. Showing the frame deletes the hints.
+    fn set_decorations(&self, window: c_ulong, on: bool) {
+        // SAFETY: the display is open; the property data outlives the call.
+        unsafe {
+            if on {
+                (self.xlib.XDeleteProperty)(self.display, window, self.motif_hints);
+            } else {
+                // flags has only MWM_HINTS_DECORATIONS (bit 1), with decorations = 0.
+                const MWM_HINTS_DECORATIONS: std::os::raw::c_ulong = 1 << 1;
+                let motif: [std::os::raw::c_ulong; 5] = [MWM_HINTS_DECORATIONS, 0, 0, 0, 0];
+                (self.xlib.XChangeProperty)(
+                    self.display,
+                    window,
+                    self.motif_hints,
+                    self.motif_hints,
+                    32,
+                    xlib::PropModeReplace,
+                    motif.as_ptr().cast::<std::os::raw::c_uchar>(),
+                    5,
+                );
+            }
+            (self.xlib.XFlush)(self.display);
+        }
+    }
+
+    /// Asks the window manager to add (`action` 1), remove (0) or toggle (2) up to two
+    /// `_NET_WM_STATE` properties on `window`. The request goes to the root window, where the
+    /// window manager listens for it.
+    fn send_wm_state(&self, window: c_ulong, action: c_long, first: c_ulong, second: c_ulong) {
+        // SAFETY: the display is open. The event is fully initialised before it is sent.
+        unsafe {
+            let mut event: XEvent = std::mem::zeroed();
+            {
+                let message = &mut event.client_message;
+                message.type_ = xlib::ClientMessage;
+                message.serial = 0;
+                message.send_event = xlib::True;
+                message.display = self.display;
+                message.window = window;
+                message.message_type = self.net.state;
+                message.format = 32;
+                let longs = message.data.as_longs_mut();
+                longs[0] = action;
+                longs[1] = first as c_long;
+                longs[2] = second as c_long;
+                longs[3] = 1; // source indication: a normal application
+                longs[4] = 0;
+            }
+            let root = (self.xlib.XDefaultRootWindow)(self.display);
+            (self.xlib.XSendEvent)(
+                self.display,
+                root,
+                xlib::False,
+                xlib::SubstructureRedirectMask | xlib::SubstructureNotifyMask,
+                &mut event,
+            );
+            (self.xlib.XFlush)(self.display);
+        }
+    }
+
+    /// The client origin of `window` in root coordinates, or `None` when the query fails.
+    fn root_position(&self, window: c_ulong) -> Option<PhysicalPosition<i32>> {
+        let mut x = 0 as c_int;
+        let mut y = 0 as c_int;
+        let mut child: c_ulong = 0;
+        // SAFETY: the display is open; the out-pointers are valid locals.
+        let ok = unsafe {
+            let root = (self.xlib.XDefaultRootWindow)(self.display);
+            (self.xlib.XTranslateCoordinates)(
+                self.display,
+                window,
+                root,
+                0,
+                0,
+                &mut x,
+                &mut y,
+                &mut child,
+            )
+        };
+        (ok != 0).then(|| PhysicalPosition::new(x, y))
+    }
+
+    /// Waits until the display or the wake socket is readable, or `timeout` passes. A byte on
+    /// the wake socket (see [`XWake`]) is consumed here, so the next wait blocks again.
     fn wait_readable(&self, timeout: Duration) {
         // SAFETY: the display is open; the fd stays valid until XCloseDisplay.
-        let fd = unsafe { (self.xlib.XConnectionNumber)(self.display) };
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
+        let display_fd = unsafe { (self.xlib.XConnectionNumber)(self.display) };
+        let mut fds = [
+            libc::pollfd {
+                fd: display_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.wake_rx.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
         let ms = c_int::try_from(timeout.as_millis()).unwrap_or(c_int::MAX);
-        // SAFETY: one valid pollfd.
-        unsafe { libc::poll(&mut pfd, 1, ms) };
+        // SAFETY: two valid pollfds.
+        unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
+        if fds[1].revents & libc::POLLIN != 0 {
+            let mut scratch = [0_u8; 64];
+            while (&self.wake_rx).read(&mut scratch).is_ok_and(|n| n > 0) {}
+        }
     }
 }
 
 impl EventLoopBackend for X11EventLoop {
+    fn monitors(&self) -> Vec<tpt_window_core::MonitorInfo> {
+        // X reports one screen here. Multi-monitor layouts need RandR, which is not used yet.
+        // SAFETY: the display is open; the screen number is the default one.
+        let (w, h) = unsafe {
+            (
+                (self.xlib.XDisplayWidth)(self.display, self.screen),
+                (self.xlib.XDisplayHeight)(self.display, self.screen),
+            )
+        };
+        vec![tpt_window_core::MonitorInfo {
+            name: None,
+            position: PhysicalPosition::new(0, 0),
+            size: PhysicalSize::new(w.max(0) as u32, h.max(0) as u32),
+            scale_factor: self.scale,
+            primary: true,
+        }]
+    }
+
+    fn wake_handle(&self) -> Option<Arc<dyn tpt_window_core::proxy::Wake>> {
+        Some(Arc::new(XWake(self.wake_tx.clone())))
+    }
+
     fn poll(&mut self, sink: &mut EventSink<'_>) -> PollStatus {
         self.drain_x_events();
         self.sync_windows();
@@ -665,20 +1004,7 @@ impl EventLoopBackend for X11EventLoop {
             (self.xlib.XSetWMProtocols)(self.display, window, &mut protocol, 1);
             (self.xlib.XSetWMNormalHints)(self.display, window, &mut hints);
             if !attrs.decorations {
-                // Motif hints: flags = MWM_HINTS_DECORATIONS (bit 1), decorations = 0. The
-                // window managers that read this remove the frame; the others ignore it.
-                const MWM_HINTS_DECORATIONS: std::os::raw::c_ulong = 1 << 1;
-                let motif: [std::os::raw::c_ulong; 5] = [MWM_HINTS_DECORATIONS, 0, 0, 0, 0];
-                (self.xlib.XChangeProperty)(
-                    self.display,
-                    window,
-                    self.motif_hints,
-                    self.motif_hints,
-                    32,
-                    xlib::PropModeReplace,
-                    motif.as_ptr().cast::<std::os::raw::c_uchar>(),
-                    5,
-                );
+                self.set_decorations(window, false);
             }
             if attrs.visible {
                 (self.xlib.XMapWindow)(self.display, window);
@@ -732,8 +1058,12 @@ impl Drop for X11EventLoop {
             // SAFETY: the display is still open here.
             unsafe { (self.xlib.XDestroyWindow)(self.display, rec.window) };
         }
-        // SAFETY: the display was opened in `new_event_loop` and is closed once.
-        unsafe { (self.xlib.XCloseDisplay)(self.display) };
+        // SAFETY: the display was opened in `new_event_loop` and is closed once. The error
+        // handler that was in place before is put back, since it is process-wide.
+        unsafe {
+            (self.xlib.XSetErrorHandler)(self.previous_error_handler);
+            (self.xlib.XCloseDisplay)(self.display);
+        }
     }
 }
 
@@ -782,5 +1112,24 @@ impl WindowBackend for X11Window {
 impl Drop for X11Window {
     fn drop(&mut self) {
         self.data.destroy_requested.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod keysym_tests {
+    use super::keysym_to_char;
+
+    #[test]
+    fn latin_and_unicode_keysyms_map_to_characters() {
+        assert_eq!(keysym_to_char(0x61), Some('a'));
+        assert_eq!(keysym_to_char(0xE9), Some('é'));
+        assert_eq!(keysym_to_char(0x0100_20AC), Some('€'));
+    }
+
+    #[test]
+    fn function_and_dead_keys_map_to_nothing() {
+        assert_eq!(keysym_to_char(0xFF0D), None, "Return");
+        assert_eq!(keysym_to_char(0xFE50), None, "dead grave");
+        assert_eq!(keysym_to_char(0x08), None, "control code");
     }
 }
