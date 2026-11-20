@@ -13,7 +13,7 @@
 #![cfg(target_arch = "wasm32")]
 #![warn(missing_docs)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -33,7 +33,7 @@ use web_sys::{
     MouseEvent, TouchEvent, WheelEvent,
 };
 
-type Pending = Rc<RefCell<RingBuffer<Event>>>;
+type Pending = Rc<RefCell<EventQueue>>;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -57,19 +57,7 @@ struct WebEventLoop {
 
 impl WebEventLoop {
     fn deliver(&self, sink: &mut EventSink<'_>) -> PollStatus {
-        let mut delivered = false;
-        loop {
-            let Some(ev) = self.pending.borrow().front() else {
-                break;
-            };
-            match sink.push(ev) {
-                EventStatus::Accepted => {
-                    self.pending.borrow_mut().pop();
-                    delivered = true;
-                }
-                _ => break,
-            }
-        }
+        let delivered = sink.drain_pending(&mut self.pending.borrow_mut());
         if self.exit.load(Ordering::Acquire) {
             PollStatus::Exit
         } else if delivered {
@@ -144,6 +132,9 @@ impl EventLoopBackend for WebEventLoop {
             state: state.clone(),
             pending,
             canvas: canvas.clone(),
+            listeners: RefCell::new(Vec::new()),
+            modifiers: Cell::new(0),
+            observer: RefCell::new(None),
         });
         install_listeners(&ctx);
         ctx.sync_size();
@@ -156,20 +147,30 @@ impl EventLoopBackend for WebEventLoop {
 
 thread_local! {
     // One ring per page, shared by the event loop and all windows.
-    static PENDING: Pending = Rc::new(RefCell::new(
-        RingBuffer::with_capacity(4096).with_policy(OverflowPolicy::DropOldest),
-    ));
+    static PENDING: Pending = Rc::new(RefCell::new(new_pending_queue()));
 }
 
 fn js_err(e: JsValue) -> WindowError {
     WindowError::Os(format!("{e:?}"))
 }
 
+/// A DOM event callback, owned so it can be removed.
+type DomListener = Closure<dyn FnMut(DomEvent)>;
+/// The ResizeObserver callback.
+type ObserverCallback = Closure<dyn FnMut(js_sys::Array)>;
+
 struct Ctx {
     id: WindowId,
     state: Arc<SharedWindowState>,
     pending: Pending,
     canvas: HtmlCanvasElement,
+    /// Canvas listeners, kept so `WebWindow::drop` can remove them. Each closure holds an
+    /// `Rc<Ctx>`, so removing them is also what breaks that reference cycle.
+    listeners: RefCell<Vec<(&'static str, DomListener)>>,
+    /// Last modifier state reported (`ModifiersState` bits), so changes are sent once.
+    modifiers: Cell<u8>,
+    /// The ResizeObserver and its callback, kept for the same reason.
+    observer: RefCell<Option<(web_sys::ResizeObserver, ObserverCallback)>>,
 }
 
 impl Ctx {
@@ -215,17 +216,25 @@ impl Ctx {
         }
     }
 
+    /// Sends `ModifiersChanged` when the modifier state differs from the last report.
+    fn sync_modifiers(&self, mods: ModifiersState) {
+        if self.modifiers.replace(mods.bits()) != mods.bits() {
+            self.push(WindowEvent::ModifiersChanged(mods));
+        }
+    }
+
     fn mouse_pos(&self, e: &MouseEvent) -> PhysicalPosition<f64> {
         let dpr = Self::dpr();
         PhysicalPosition::new(f64::from(e.offset_x()) * dpr, f64::from(e.offset_y()) * dpr)
     }
 }
 
-fn listen<E: JsCast + 'static>(target: &EventTarget, name: &str, mut f: impl FnMut(E) + 'static) {
+fn listen<E: JsCast + 'static>(ctx: &Ctx, name: &'static str, mut f: impl FnMut(E) + 'static) {
     let closure =
         Closure::<dyn FnMut(DomEvent)>::new(move |e: DomEvent| f(e.unchecked_into::<E>()));
+    let target: &EventTarget = ctx.canvas.as_ref();
     let _ = target.add_event_listener_with_callback(name, closure.as_ref().unchecked_ref());
-    closure.forget();
+    ctx.listeners.borrow_mut().push((name, closure));
 }
 
 fn button(b: i16) -> MouseButton {
@@ -240,21 +249,19 @@ fn button(b: i16) -> MouseButton {
 }
 
 fn install_listeners(ctx: &Rc<Ctx>) {
-    let t: &EventTarget = ctx.canvas.as_ref();
-
     let c = ctx.clone();
-    listen(t, "mousemove", move |e: MouseEvent| {
+    listen(ctx, "mousemove", move |e: MouseEvent| {
         c.push(WindowEvent::CursorMoved {
             position: c.mouse_pos(&e),
             pressure: 0.0,
         });
     });
     let c = ctx.clone();
-    listen(t, "mouseenter", move |_: DomEvent| {
+    listen(ctx, "mouseenter", move |_: DomEvent| {
         c.push(WindowEvent::CursorEntered)
     });
     let c = ctx.clone();
-    listen(t, "mouseleave", move |_: DomEvent| {
+    listen(ctx, "mouseleave", move |_: DomEvent| {
         c.push(WindowEvent::CursorLeft)
     });
     for (name, state) in [
@@ -262,7 +269,7 @@ fn install_listeners(ctx: &Rc<Ctx>) {
         ("mouseup", ElementState::Released),
     ] {
         let c = ctx.clone();
-        listen(t, name, move |e: MouseEvent| {
+        listen(ctx, name, move |e: MouseEvent| {
             if state == ElementState::Pressed {
                 let _ = c.canvas.focus();
             }
@@ -273,12 +280,12 @@ fn install_listeners(ctx: &Rc<Ctx>) {
         });
     }
     let c = ctx.clone();
-    listen(t, "contextmenu", move |e: DomEvent| {
+    listen(ctx, "contextmenu", move |e: DomEvent| {
         e.prevent_default();
         let _ = &c;
     });
     let c = ctx.clone();
-    listen(t, "wheel", move |e: WheelEvent| {
+    listen(ctx, "wheel", move |e: WheelEvent| {
         e.prevent_default();
         // Web y grows downwards; flip so positive means "scroll up", matching Win32.
         let delta = if e.delta_mode() == 0 {
@@ -303,7 +310,13 @@ fn install_listeners(ctx: &Rc<Ctx>) {
         ("keyup", ElementState::Released),
     ] {
         let c = ctx.clone();
-        listen(t, name, move |e: KeyboardEvent| {
+        listen(ctx, name, move |e: KeyboardEvent| {
+            c.sync_modifiers(ModifiersState::new(
+                e.shift_key(),
+                e.ctrl_key(),
+                e.alt_key(),
+                e.meta_key(),
+            ));
             let key_code = key_code(&e);
             c.push(WindowEvent::KeyboardInput {
                 state,
@@ -326,8 +339,12 @@ fn install_listeners(ctx: &Rc<Ctx>) {
     for name in ["focus", "blur"] {
         let c = ctx.clone();
         let focused = name == "focus";
-        listen(t, name, move |_: FocusEvent| {
+        listen(ctx, name, move |_: FocusEvent| {
             c.state.update(|s| s.focused = focused);
+            if !focused {
+                // Keys released while the page is not focused send no events, so clear them.
+                c.sync_modifiers(ModifiersState::empty());
+            }
             c.push(WindowEvent::Focused(focused));
         });
     }
@@ -339,7 +356,7 @@ fn install_listeners(ctx: &Rc<Ctx>) {
         ("touchcancel", TouchPhase::Cancelled),
     ] {
         let c = ctx.clone();
-        listen(t, name, move |e: TouchEvent| {
+        listen(ctx, name, move |e: TouchEvent| {
             e.prevent_default();
             let rect = c.canvas.get_bounding_client_rect();
             let dpr = Ctx::dpr();
@@ -365,8 +382,8 @@ fn install_listeners(ctx: &Rc<Ctx>) {
     let cb = Closure::<dyn FnMut(js_sys::Array)>::new(move |_entries: js_sys::Array| c.sync_size());
     if let Ok(observer) = web_sys::ResizeObserver::new(cb.as_ref().unchecked_ref()) {
         observer.observe(&ctx.canvas);
+        *ctx.observer.borrow_mut() = Some((observer, cb));
     }
-    cb.forget();
 }
 
 /// Layout-translated key: single letters/digits from `KeyboardEvent.key`, otherwise by code.
@@ -448,6 +465,31 @@ fn code_to_key(code: &str) -> KeyCode {
         "NumpadDivide" => NumpadDivide,
         "NumpadEnter" => NumpadEnter,
         "NumpadDecimal" => NumpadDecimal,
+        "NumLock" => NumLock,
+        "ScrollLock" => ScrollLock,
+        "PrintScreen" => PrintScreen,
+        "Pause" => Pause,
+        "ContextMenu" => Menu,
+        "F13" => F13,
+        "F14" => F14,
+        "F15" => F15,
+        "F16" => F16,
+        "F17" => F17,
+        "F18" => F18,
+        "F19" => F19,
+        "F20" => F20,
+        "F21" => F21,
+        "F22" => F22,
+        "F23" => F23,
+        "F24" => F24,
+        "IntlBackslash" => IntlBackslash,
+        "MediaPlayPause" => MediaPlayPause,
+        "MediaStop" => MediaStop,
+        "MediaTrackNext" => MediaTrackNext,
+        "MediaTrackPrevious" => MediaTrackPrevious,
+        "AudioVolumeUp" => AudioVolumeUp,
+        "AudioVolumeDown" => AudioVolumeDown,
+        "AudioVolumeMute" => AudioVolumeMute,
         _ => Unidentified,
     }
 }
@@ -486,6 +528,21 @@ pub struct WebWindow {
 // so no value is ever accessed concurrently.
 unsafe impl Send for WebWindow {}
 unsafe impl Sync for WebWindow {}
+
+impl Drop for WebWindow {
+    fn drop(&mut self) {
+        let ctx = &self.ctx;
+        let target: &EventTarget = ctx.canvas.as_ref();
+        for (name, closure) in ctx.listeners.borrow_mut().drain(..) {
+            let _ =
+                target.remove_event_listener_with_callback(name, closure.as_ref().unchecked_ref());
+        }
+        if let Some((observer, _callback)) = ctx.observer.borrow_mut().take() {
+            observer.disconnect();
+        }
+        ctx.push(WindowEvent::Destroyed);
+    }
+}
 
 impl WindowBackend for WebWindow {
     fn id(&self) -> WindowId {
