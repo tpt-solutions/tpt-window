@@ -93,6 +93,16 @@ pub enum WindowCommand {
     },
     /// Ask for a `RedrawRequested` event.
     RequestRedraw,
+    /// Set or clear (`None`) the minimum inner size, in physical pixels.
+    SetMinSize(Option<PhysicalSize<u32>>),
+    /// Set or clear (`None`) the maximum inner size, in physical pixels.
+    SetMaxSize(Option<PhysicalSize<u32>>),
+    /// Allow or forbid the user to resize the window.
+    SetResizable(bool),
+    /// Maximize (`true`) or restore (`false`).
+    SetMaximized(bool),
+    /// Minimize (`true`) or restore (`false`).
+    SetMinimized(bool),
 }
 
 /// Creation parameters, built by [`WindowBuilder`](crate::WindowBuilder).

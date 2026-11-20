@@ -44,6 +44,8 @@ pub enum WindowEvent {
         /// Layout-independent key position.
         physical_key: PhysicalKey,
     },
+    /// The modifier keys held changed. Sent before the key event that caused it.
+    ModifiersChanged(crate::input::ModifiersState),
     /// Input method event.
     Ime(ImeEvent),
 

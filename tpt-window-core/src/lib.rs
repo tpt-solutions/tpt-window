@@ -15,6 +15,7 @@
 #![warn(missing_docs)]
 
 pub mod backend;
+pub mod channel;
 pub mod dpi;
 #[cfg(feature = "ecs")]
 pub mod ecs;
@@ -43,7 +44,7 @@ pub use input::*;
 pub use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 pub use ring::{DEFAULT_CAPACITY, OverflowPolicy, RingBuffer};
 pub use security::{CapabilityToken, DisplayScope, InputScope, SurfaceHandle, WindowScope};
-pub use sink::{EventQueue, EventSink, EventStatus};
+pub use sink::{EventQueue, EventSink, EventStatus, PENDING_CAPACITY, new_pending_queue};
 pub use text::{ImeEvent, ImeText, InlineText};
 pub use window::{Window, WindowBuilder};
 

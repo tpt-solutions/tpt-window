@@ -83,6 +83,11 @@ impl<T: Copy> RingBuffer<T> {
         self.dropped = 0;
     }
 
+    /// Returns the drop count and resets it to zero, so each loss is reported once.
+    pub fn take_dropped(&mut self) -> u64 {
+        std::mem::take(&mut self.dropped)
+    }
+
     /// Pushes an item. Returns `false` if it was not stored (`DropNewest` and full).
     /// With `DropOldest` this always returns `true` and may evict the oldest item.
     pub fn push(&mut self, item: T) -> bool {

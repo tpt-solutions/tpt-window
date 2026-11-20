@@ -11,6 +11,10 @@ pub enum WindowError {
     Unsupported(&'static str),
     /// The operating system reported a failure.
     Os(String),
+    /// The platform has a windowing system, but it is not running or cannot be reached (for
+    /// example, `DISPLAY` is unset or the Wayland socket is missing). Try again in a session
+    /// that has one.
+    NoDisplay(String),
     /// The window has been destroyed.
     Destroyed,
     /// The capability token was rejected.
@@ -24,6 +28,7 @@ impl fmt::Display for WindowError {
         match self {
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
             Self::Os(msg) => write!(f, "os error: {msg}"),
+            Self::NoDisplay(msg) => write!(f, "no display server: {msg}"),
             Self::Destroyed => f.write_str("window destroyed"),
             Self::CapabilityDenied => f.write_str("capability denied"),
             Self::NoNativeHandle => f.write_str("window has no native handle"),

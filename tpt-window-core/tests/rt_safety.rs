@@ -154,3 +154,53 @@ fn counter_actually_counts() {
     assert!(allocs() > before);
     drop(v);
 }
+
+#[test]
+fn frame_ring_and_encoder_allocate_nothing_in_steady_state() {
+    use tpt_window_core::channel::{FrameRing, RingMemory};
+    use tpt_window_core::protocol::{Message, encode};
+
+    /// Plain memory, so the ring itself is what is measured.
+    struct Mem(Vec<u8>);
+    impl RingMemory for Mem {
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+        fn read(&self, offset: usize, out: &mut [u8]) {
+            out.copy_from_slice(&self.0[offset..offset + out.len()]);
+        }
+        fn write(&mut self, offset: usize, data: &[u8]) {
+            self.0[offset..offset + data.len()].copy_from_slice(data);
+        }
+        fn load_u32(&self, offset: usize) -> u32 {
+            let mut b = [0u8; 4];
+            b.copy_from_slice(&self.0[offset..offset + 4]);
+            u32::from_le_bytes(b)
+        }
+        fn store_u32(&mut self, offset: usize, value: u32) {
+            self.0[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    let msg = Message::Hello { version: 1 };
+    // --- setup (allocation allowed) ---
+    let mut ring = FrameRing::new(Mem(vec![0; 16 + 8192])).unwrap();
+    ring.reset();
+    let mut out = Vec::with_capacity(64);
+    // Warm up: the first push/pop sizes the reusable buffers.
+    ring.push(&msg).unwrap();
+    assert!(ring.pop().unwrap().is_some());
+    out.clear();
+    encode(&msg, &mut out);
+
+    // --- measured region ---
+    let before = allocs();
+    for _ in 0..1000 {
+        ring.push(&msg).unwrap();
+        assert!(ring.pop().unwrap().is_some());
+        out.clear();
+        encode(&msg, &mut out);
+    }
+    let after = allocs();
+    assert_eq!(after - before, 0, "frame ring or encoder allocated");
+}

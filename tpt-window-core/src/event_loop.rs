@@ -60,7 +60,8 @@ impl EventLoop {
         self.finish_frame(sink, status)
     }
 
-    /// Ask the loop to terminate; the next poll returns [`PollStatus::Exit`].
+    /// Asks the loop to terminate; the next poll returns [`PollStatus::Exit`]. Call it from the
+    /// thread that owns the loop, since `EventLoop` is not `Send`.
     pub fn request_exit(&self) {
         self.exit.store(true, Ordering::Release);
         self.inner.request_exit();
@@ -83,7 +84,8 @@ impl EventLoop {
                     timestamp_ns,
                 },
             });
-            if status == EventStatus::BufferFull {
+            // Refused either way (full, or the poll was captured), so the yield point is lost.
+            if status != EventStatus::Accepted {
                 sink.record_drop();
             }
         }

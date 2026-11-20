@@ -120,45 +120,49 @@ pub fn negotiate(client: u32, server: u32) -> Result<u32, NegotiateError> {
 }
 
 /// Appends the wire encoding of `message` to `out`.
+///
+/// Writes straight into `out` (the length prefix is patched in afterwards), so encoding
+/// allocates nothing beyond what `out` itself needs.
 pub fn encode(message: &Message, out: &mut Vec<u8>) {
-    let mut body = Vec::with_capacity(32);
+    let start = out.len();
+    out.extend_from_slice(&[0; 4]);
     match *message {
         Message::Hello { version } => {
-            body.push(TAG_HELLO);
-            body.extend_from_slice(&version.to_le_bytes());
+            out.push(TAG_HELLO);
+            out.extend_from_slice(&version.to_le_bytes());
         }
         Message::Welcome { version } => {
-            body.push(TAG_WELCOME);
-            body.extend_from_slice(&version.to_le_bytes());
+            out.push(TAG_WELCOME);
+            out.extend_from_slice(&version.to_le_bytes());
         }
         Message::SurfaceReady {
             window,
             surface,
             size,
         } => {
-            body.push(TAG_SURFACE_READY);
-            body.extend_from_slice(&window.0.to_le_bytes());
-            body.extend_from_slice(&surface.id.to_le_bytes());
-            body.extend_from_slice(&size.width.to_le_bytes());
-            body.extend_from_slice(&size.height.to_le_bytes());
+            out.push(TAG_SURFACE_READY);
+            out.extend_from_slice(&window.0.to_le_bytes());
+            out.extend_from_slice(&surface.id.to_le_bytes());
+            out.extend_from_slice(&size.width.to_le_bytes());
+            out.extend_from_slice(&size.height.to_le_bytes());
         }
         Message::FramePresented {
             window,
             surface,
             frame,
         } => {
-            body.push(TAG_FRAME_PRESENTED);
-            body.extend_from_slice(&window.0.to_le_bytes());
-            body.extend_from_slice(&surface.id.to_le_bytes());
-            body.extend_from_slice(&frame.to_le_bytes());
+            out.push(TAG_FRAME_PRESENTED);
+            out.extend_from_slice(&window.0.to_le_bytes());
+            out.extend_from_slice(&surface.id.to_le_bytes());
+            out.extend_from_slice(&frame.to_le_bytes());
         }
         Message::CloseWindow { window } => {
-            body.push(TAG_CLOSE_WINDOW);
-            body.extend_from_slice(&window.0.to_le_bytes());
+            out.push(TAG_CLOSE_WINDOW);
+            out.extend_from_slice(&window.0.to_le_bytes());
         }
     }
-    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    out.extend_from_slice(&body);
+    let body_len = (out.len() - start - 4) as u32;
+    out[start..start + 4].copy_from_slice(&body_len.to_le_bytes());
 }
 
 /// Decodes one frame from the start of `buf`. Returns the message and the number of bytes it

@@ -281,6 +281,56 @@ pub enum KeyCode {
     NumpadEnter,
     /// Numpad decimal separator.
     NumpadDecimal,
+    /// The Num Lock key.
+    NumLock,
+    /// The Scroll Lock key.
+    ScrollLock,
+    /// The Print Screen (SysRq) key.
+    PrintScreen,
+    /// The Pause (Break) key.
+    Pause,
+    /// The application menu key (between the right Super and Control keys).
+    Menu,
+    /// Function key F13.
+    F13,
+    /// Function key F14.
+    F14,
+    /// Function key F15.
+    F15,
+    /// Function key F16.
+    F16,
+    /// Function key F17.
+    F17,
+    /// Function key F18.
+    F18,
+    /// Function key F19.
+    F19,
+    /// Function key F20.
+    F20,
+    /// Function key F21.
+    F21,
+    /// Function key F22.
+    F22,
+    /// Function key F23.
+    F23,
+    /// Function key F24.
+    F24,
+    /// The extra key next to the left Shift on ISO keyboards.
+    IntlBackslash,
+    /// The media play/pause key.
+    MediaPlayPause,
+    /// The media stop key.
+    MediaStop,
+    /// The media next-track key.
+    MediaTrackNext,
+    /// The media previous-track key.
+    MediaTrackPrevious,
+    /// The volume up key.
+    AudioVolumeUp,
+    /// The volume down key.
+    AudioVolumeDown,
+    /// The volume mute key.
+    AudioVolumeMute,
     /// A key with no known code (the raw scancode is in `PhysicalKey::Unidentified`).
     Unidentified,
 }
@@ -397,6 +447,126 @@ pub fn key_from_evdev(code: u32) -> KeyCode {
         111 => KeyCode::Delete,
         125 => KeyCode::SuperLeft,
         126 => KeyCode::SuperRight,
+        69 => KeyCode::NumLock,
+        70 => KeyCode::ScrollLock,
+        99 => KeyCode::PrintScreen,
+        119 => KeyCode::Pause,
+        127 => KeyCode::Menu,
+        183 => KeyCode::F13,
+        184 => KeyCode::F14,
+        185 => KeyCode::F15,
+        186 => KeyCode::F16,
+        187 => KeyCode::F17,
+        188 => KeyCode::F18,
+        189 => KeyCode::F19,
+        190 => KeyCode::F20,
+        191 => KeyCode::F21,
+        192 => KeyCode::F22,
+        193 => KeyCode::F23,
+        194 => KeyCode::F24,
+        86 => KeyCode::IntlBackslash,
+        164 => KeyCode::MediaPlayPause,
+        166 => KeyCode::MediaStop,
+        163 => KeyCode::MediaTrackNext,
+        165 => KeyCode::MediaTrackPrevious,
+        115 => KeyCode::AudioVolumeUp,
+        114 => KeyCode::AudioVolumeDown,
+        113 => KeyCode::AudioVolumeMute,
         _ => KeyCode::Unidentified,
+    }
+}
+
+/// The modifier keys held down. A plain bit set, so it is `Copy` and small enough for an event.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ModifiersState(u8);
+
+impl ModifiersState {
+    const SHIFT: u8 = 1;
+    const CONTROL: u8 = 2;
+    const ALT: u8 = 4;
+    const SUPER: u8 = 8;
+
+    /// No modifiers held.
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// The raw bits, for encoding. See [`ModifiersState::from_bits`] for the inverse.
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Rebuilds the state from [`bits`](Self::bits). Bits outside the four modifiers are dropped.
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits & 0x0F)
+    }
+
+    /// Builds the state from the flags of the individual keys.
+    pub const fn new(shift: bool, control: bool, alt: bool, super_key: bool) -> Self {
+        const fn bit(on: bool, flag: u8) -> u8 {
+            if on { flag } else { 0 }
+        }
+        Self(
+            bit(shift, Self::SHIFT)
+                | bit(control, Self::CONTROL)
+                | bit(alt, Self::ALT)
+                | bit(super_key, Self::SUPER),
+        )
+    }
+
+    /// Either Shift key.
+    pub const fn shift(self) -> bool {
+        self.0 & Self::SHIFT != 0
+    }
+
+    /// Either Control key.
+    pub const fn control(self) -> bool {
+        self.0 & Self::CONTROL != 0
+    }
+
+    /// Either Alt key (Option on macOS).
+    pub const fn alt(self) -> bool {
+        self.0 & Self::ALT != 0
+    }
+
+    /// Either Super key (Windows key, Command on macOS).
+    pub const fn super_key(self) -> bool {
+        self.0 & Self::SUPER != 0
+    }
+}
+
+#[cfg(test)]
+mod modifier_tests {
+    use super::ModifiersState;
+
+    #[test]
+    fn flags_round_trip_through_bits() {
+        let m = ModifiersState::new(true, false, true, false);
+        assert!(m.shift() && !m.control() && m.alt() && !m.super_key());
+        assert_eq!(ModifiersState::from_bits(m.bits()), m);
+        assert_eq!(
+            ModifiersState::empty(),
+            ModifiersState::new(false, false, false, false)
+        );
+    }
+
+    #[test]
+    fn from_bits_drops_unknown_bits() {
+        assert_eq!(ModifiersState::from_bits(0xF0), ModifiersState::empty());
+    }
+}
+
+#[cfg(test)]
+mod evdev_tests {
+    use super::{KeyCode, key_from_evdev};
+
+    #[test]
+    fn extended_keys_map_from_evdev() {
+        assert_eq!(key_from_evdev(69), KeyCode::NumLock);
+        assert_eq!(key_from_evdev(99), KeyCode::PrintScreen);
+        assert_eq!(key_from_evdev(183), KeyCode::F13);
+        assert_eq!(key_from_evdev(194), KeyCode::F24);
+        assert_eq!(key_from_evdev(113), KeyCode::AudioVolumeMute);
+        assert_eq!(key_from_evdev(4000), KeyCode::Unidentified);
     }
 }

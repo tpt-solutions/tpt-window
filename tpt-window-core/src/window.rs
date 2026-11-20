@@ -119,6 +119,34 @@ impl Window {
     pub fn request_redraw(&self) {
         self.inner.send_command(WindowCommand::RequestRedraw);
     }
+
+    /// Sets or clears the minimum inner size (physical pixels). Applied on the next poll.
+    pub fn set_min_size(&self, size: Option<PhysicalSize<u32>>) {
+        self.inner.send_command(WindowCommand::SetMinSize(size));
+    }
+
+    /// Sets or clears the maximum inner size (physical pixels). Applied on the next poll.
+    pub fn set_max_size(&self, size: Option<PhysicalSize<u32>>) {
+        self.inner.send_command(WindowCommand::SetMaxSize(size));
+    }
+
+    /// Allows or forbids resizing by the user. Applied on the next poll.
+    pub fn set_resizable(&self, resizable: bool) {
+        self.inner
+            .send_command(WindowCommand::SetResizable(resizable));
+    }
+
+    /// Maximizes or restores the window. Applied on the next poll.
+    pub fn set_maximized(&self, maximized: bool) {
+        self.inner
+            .send_command(WindowCommand::SetMaximized(maximized));
+    }
+
+    /// Minimizes or restores the window. Applied on the next poll.
+    pub fn set_minimized(&self, minimized: bool) {
+        self.inner
+            .send_command(WindowCommand::SetMinimized(minimized));
+    }
 }
 
 /// Builder for [`Window`].
