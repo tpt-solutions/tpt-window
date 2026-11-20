@@ -23,7 +23,7 @@ use std::ptr::{null, null_mut};
 use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicIsize, AtomicU8, AtomicU16, AtomicU64, Ordering,
 };
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use raw_window_handle::{
@@ -44,7 +44,8 @@ use windows_sys::Win32::UI::Input::Ime::{
     ImmSetCompositionWindow,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::Input::Touch::{
     CloseTouchInputHandle, GetTouchInputInfo, RegisterTouchWindow, TOUCHEVENTF_DOWN,
@@ -52,7 +53,7 @@ use windows_sys::Win32::UI::Input::Touch::{
 };
 use windows_sys::Win32::UI::Input::{
     GetRawInputData, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK,
-    RIM_TYPEMOUSE, RegisterRawInputDevices,
+    RIDEV_REMOVE, RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -118,8 +119,11 @@ const fn utf16z<const N: usize>(s: &[u8]) -> [u16; N] {
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    static PENDING: RefCell<RingBuffer<Event>> =
-        RefCell::new(RingBuffer::with_capacity(4096).with_policy(OverflowPolicy::DropOldest));
+    /// Reused buffer for `GetRawInputData`, so `WM_INPUT` does not allocate.
+    static SCRATCH_RAW: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(64));
+    /// Reused buffer for `GetTouchInputInfo`, so `WM_TOUCH` does not allocate.
+    static SCRATCH_TOUCH: RefCell<Vec<TOUCHINPUT>> = RefCell::new(Vec::with_capacity(10));
+    static PENDING: RefCell<EventQueue> = RefCell::new(new_pending_queue());
 }
 
 fn push_event(window: WindowId, event: WindowEvent) {
@@ -145,6 +149,13 @@ struct WindowData {
     limits: Mutex<Limits>,
     cursor_inside: AtomicBool,
     buttons_down: AtomicU8,
+    /// Keys and buttons currently held, so focus loss can release them. Without this a key
+    /// held through Alt-Tab stays down for the application.
+    held_keys: Mutex<Vec<(u32, KeyCode, PhysicalKey)>>,
+    held_buttons: Mutex<Vec<MouseButton>>,
+    minimized: AtomicBool,
+    /// Last modifier state reported, so `ModifiersChanged` is sent only on a change.
+    modifiers: AtomicU8,
     high_surrogate: AtomicU16,
     // Last reported client size, to avoid duplicate Resized events.
     last_w: AtomicI32,
@@ -223,6 +234,10 @@ const DIGITS: [KeyCode; 10] = {
 const FKEYS: [KeyCode; 12] = {
     use KeyCode::*;
     [F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12]
+};
+const F13_F24: [KeyCode; 12] = {
+    use KeyCode::*;
+    [F13, F14, F15, F16, F17, F18, F19, F20, F21, F22, F23, F24]
 };
 const NUMPAD: [KeyCode; 10] = {
     use KeyCode::*;
@@ -305,6 +320,20 @@ fn translate_vk(vk: u32, scancode: u32, extended: bool) -> KeyCode {
         0x6D => NumpadSubtract,
         0x6E => NumpadDecimal,
         0x6F => NumpadDivide,
+        0x7C..=0x87 => F13_F24[(vk - 0x7C) as usize],
+        0x90 => NumLock,
+        0x91 => ScrollLock,
+        0x2C => PrintScreen,
+        0x13 => Pause,
+        0x5D => Menu,
+        0xE2 => IntlBackslash,
+        0xB3 => MediaPlayPause,
+        0xB2 => MediaStop,
+        0xB0 => MediaTrackNext,
+        0xB1 => MediaTrackPrevious,
+        0xAF => AudioVolumeUp,
+        0xAE => AudioVolumeDown,
+        0xAD => AudioVolumeMute,
         _ => Unidentified,
     }
 }
@@ -383,6 +412,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     if msg == WM_NCCREATE {
         let cs = lparam as *const CREATESTRUCTW;
         let data = unsafe { (*cs).lpCreateParams } as *const WindowData;
+        // The window now owns the reference made in create_window, and WM_NCDESTROY releases it.
+        UNCLAIMED_REF.with(|c| c.set(0));
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, data as _) };
         return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
     }
@@ -393,6 +424,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 
     match msg {
         WM_NCDESTROY => {
+            // Give up raw mouse input if this window had it, so the next window gets it.
+            release_raw_mouse_if_owner(hwnd);
             let p = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) } as *const WindowData;
             // SAFETY: balances the Arc::into_raw in create_window.
             drop(unsafe { Arc::from_raw(p) });
@@ -439,13 +472,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             return 0;
         }
         WM_SIZE => {
-            if wparam == SIZE_MINIMIZED as usize {
-                push_event(id, WindowEvent::Occluded(true));
-            } else {
-                if d.last_w.load(Ordering::Relaxed) == 0 && d.last_h.load(Ordering::Relaxed) == 0 {
-                    // first real size
-                }
-                push_event(id, WindowEvent::Occluded(false));
+            let minimized = wparam == SIZE_MINIMIZED as usize;
+            // WM_SIZE arrives on every resize; report only real minimize/restore changes.
+            if d.minimized.swap(minimized, Ordering::Relaxed) != minimized {
+                push_event(id, WindowEvent::Occluded(minimized));
+            }
+            if !minimized {
                 let size = client_size(hwnd);
                 if d.last_w.swap(size.width as i32, Ordering::Relaxed) != size.width as i32
                     || d.last_h.swap(size.height as i32, Ordering::Relaxed) != size.height as i32
@@ -457,6 +489,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             return 0;
         }
         WM_MOVE => {
+            // A minimized window reports a position of (-32000, -32000); that is not a move.
+            if unsafe { IsIconic(hwnd) } != 0 {
+                return 0;
+            }
             let pos = outer_pos(hwnd);
             d.state.update(|s| s.position = pos);
             push_event(id, WindowEvent::Moved(pos));
@@ -465,7 +501,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_SETFOCUS | WM_KILLFOCUS => {
             let f = msg == WM_SETFOCUS;
             d.state.update(|s| s.focused = f);
+            if !f {
+                release_held_input(id, d);
+            }
             push_event(id, WindowEvent::Focused(f));
+            return 0;
+        }
+        // The system took mouse capture or cancelled the mode, so the matching button-up
+        // messages will not arrive. Release what is held.
+        WM_CAPTURECHANGED | WM_CANCELMODE => {
+            release_held_input(id, d);
             return 0;
         }
         WM_DPICHANGED => {
@@ -539,7 +584,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 )
             };
             if size > 0 {
-                let mut buf = vec![0_u8; size as usize];
+                // Reuse a per-thread buffer: raw input arrives at mouse rate, so allocating
+                // here would break the zero-allocation hot path.
+                let mut buf = SCRATCH_RAW.with(|s| core::mem::take(&mut *s.borrow_mut()));
+                buf.clear();
+                buf.resize(size as usize, 0);
                 let got = unsafe {
                     GetRawInputData(
                         lparam as _,
@@ -569,6 +618,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         }
                     }
                 }
+                SCRATCH_RAW.with(|s| *s.borrow_mut() = buf);
             }
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         }
@@ -586,7 +636,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_TOUCH => {
             let count = wparam;
-            let mut inputs: Vec<TOUCHINPUT> = vec![unsafe { core::mem::zeroed() }; count];
+            // Per-thread scratch, as for raw input: no allocation per touch message.
+            let mut inputs = SCRATCH_TOUCH.with(|s| core::mem::take(&mut *s.borrow_mut()));
+            inputs.clear();
+            inputs.resize(count, unsafe { core::mem::zeroed() });
             let ok = unsafe {
                 GetTouchInputInfo(
                     lparam as _,
@@ -622,6 +675,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
             }
             unsafe { CloseTouchInputHandle(lparam as _) };
+            SCRATCH_TOUCH.with(|s| *s.borrow_mut() = inputs);
             return 0;
         }
         WM_MOUSELEAVE => {
@@ -634,11 +688,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if let Some((button, state)) = mouse_button(msg, wparam) {
                 match state {
                     ElementState::Pressed => {
+                        track_held(&d.held_buttons, button, true);
                         if d.buttons_down.fetch_add(1, Ordering::Relaxed) == 0 {
                             unsafe { SetCapture(hwnd) };
                         }
                     }
                     ElementState::Released => {
+                        track_held(&d.held_buttons, button, false);
                         let prev = d.buttons_down.load(Ordering::Relaxed);
                         d.buttons_down
                             .store(prev.saturating_sub(1), Ordering::Relaxed);
@@ -682,6 +738,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let extended = (lparam >> 24) & 1 == 1;
             let key_code = translate_vk(wparam as u32, scancode, extended);
             let physical_key = physical_from_scancode(scancode, extended, key_code);
+            track_held_key(d, wparam as u32, key_code, physical_key, state);
+            sync_modifiers(d, id);
             push_event(
                 id,
                 WindowEvent::KeyboardInput {
@@ -697,18 +755,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_CHAR => {
             let unit = wparam as u16;
+            // Any unit other than a high surrogate ends a pending pair, so a stale high
+            // surrogate can never join with a later low surrogate.
+            let pending_high = d.high_surrogate.swap(0, Ordering::Relaxed);
+            if (0xD800..0xDC00).contains(&unit) {
+                d.high_surrogate.store(unit, Ordering::Relaxed);
+                return 0;
+            }
             // Skip control characters (Backspace, Enter, Tab, Escape arrive as keys).
             if unit >= 0x20 && unit != 0x7F {
-                let ch = if (0xD800..0xDC00).contains(&unit) {
-                    d.high_surrogate.store(unit, Ordering::Relaxed);
-                    None
-                } else if (0xDC00..0xE000).contains(&unit) {
-                    let hi = d.high_surrogate.swap(0, Ordering::Relaxed);
-                    char::decode_utf16([hi, unit]).next().and_then(Result::ok)
-                } else {
-                    char::from_u32(u32::from(unit))
-                };
-                if let Some(ch) = ch {
+                if let Some(ch) = wm_char_to_char(pending_high, unit) {
                     let mut buf = [0u8; 4];
                     push_event(
                         id,
@@ -724,6 +780,119 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         _ => {}
     }
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// Adds or removes a button from the held list. Presses are de-duplicated, and a release for
+/// a button that is not held is ignored.
+fn track_held(held: &Mutex<Vec<MouseButton>>, button: MouseButton, down: bool) {
+    let mut held = held.lock().unwrap_or_else(|e| e.into_inner());
+    if down {
+        if !held.contains(&button) {
+            held.push(button);
+        }
+    } else {
+        held.retain(|b| *b != button);
+    }
+}
+
+/// Records a key press or release by virtual key. Auto-repeat presses are de-duplicated.
+fn track_held_key(
+    d: &WindowData,
+    vk: u32,
+    key_code: KeyCode,
+    physical_key: PhysicalKey,
+    state: ElementState,
+) {
+    let mut held = d.held_keys.lock().unwrap_or_else(|e| e.into_inner());
+    match state {
+        ElementState::Pressed => {
+            if !held.iter().any(|(v, _, _)| *v == vk) {
+                held.push((vk, key_code, physical_key));
+            }
+        }
+        ElementState::Released => held.retain(|(v, _, _)| *v != vk),
+    }
+}
+
+/// Emits a release for every key and button still held, and drops mouse capture. Called on
+/// focus loss and when the system takes capture away, because the real release messages will
+/// not arrive. Each release is reported once.
+/// The modifier keys held right now. `GetKeyState` reports the state as this thread's message
+/// queue has seen it, which is the state the key messages describe.
+fn current_modifiers() -> ModifiersState {
+    // The high bit is set while a key is down.
+    let down = |vk: u16| unsafe { GetKeyState(i32::from(vk)) } < 0;
+    ModifiersState::new(
+        down(VK_SHIFT),
+        down(VK_CONTROL),
+        down(VK_MENU),
+        down(VK_LWIN) || down(VK_RWIN),
+    )
+}
+
+/// Sends `ModifiersChanged` if the held modifiers differ from the last report.
+fn sync_modifiers(d: &WindowData, id: WindowId) {
+    let mods = current_modifiers();
+    if d.modifiers.swap(mods.bits(), Ordering::Relaxed) != mods.bits() {
+        push_event(id, WindowEvent::ModifiersChanged(mods));
+    }
+}
+
+fn release_held_input(id: WindowId, d: &WindowData) {
+    loop {
+        let next = d.held_keys.lock().unwrap_or_else(|e| e.into_inner()).pop();
+        let Some((_, key_code, physical_key)) = next else {
+            break;
+        };
+        push_event(
+            id,
+            WindowEvent::KeyboardInput {
+                state: ElementState::Released,
+                key_code,
+                physical_key,
+            },
+        );
+    }
+    loop {
+        let next = d
+            .held_buttons
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop();
+        let Some(button) = next else {
+            break;
+        };
+        push_event(
+            id,
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button,
+            },
+        );
+    }
+    if d.buttons_down.swap(0, Ordering::Relaxed) != 0 {
+        unsafe { ReleaseCapture() };
+    }
+    // Focus loss clears the modifiers too, so a Shift held through Alt-Tab is not still held.
+    if d.modifiers.swap(0, Ordering::Relaxed) != 0 {
+        push_event(id, WindowEvent::ModifiersChanged(ModifiersState::empty()));
+    }
+}
+
+/// Turns one `WM_CHAR` unit into a character, given the high surrogate that came before it
+/// (0 when there was none). Returns `None` for a unit that is not a complete character:
+/// a lone low surrogate, or a pair whose high half is missing. A lone low surrogate must not
+/// decode as NUL.
+fn wm_char_to_char(pending_high: u16, unit: u16) -> Option<char> {
+    if (0xDC00..0xE000).contains(&unit) {
+        if pending_high == 0 {
+            return None;
+        }
+        return char::decode_utf16([pending_high, unit])
+            .next()
+            .and_then(Result::ok);
+    }
+    char::from_u32(u32::from(unit))
 }
 
 fn apply_command(hwnd: HWND, d: &WindowData, cmd: WindowCommand) {
@@ -771,8 +940,55 @@ fn apply_command(hwnd: HWND, d: &WindowData, cmd: WindowCommand) {
         WindowCommand::RequestRedraw => {
             unsafe { InvalidateRect(hwnd, null(), 0) };
         }
+        WindowCommand::SetMinSize(size) => {
+            let scale = unsafe { GetDpiForWindow(hwnd) } as f64 / 96.0;
+            let mut limits = d.limits.lock().unwrap_or_else(|e| e.into_inner());
+            limits.min = size.map(|s| to_logical(s, scale));
+        }
+        WindowCommand::SetMaxSize(size) => {
+            let scale = unsafe { GetDpiForWindow(hwnd) } as f64 / 96.0;
+            let mut limits = d.limits.lock().unwrap_or_else(|e| e.into_inner());
+            limits.max = size.map(|s| to_logical(s, scale));
+        }
+        WindowCommand::SetResizable(resizable) => {
+            // Resizing is the sizing frame plus the maximize box. Changing them needs
+            // SWP_FRAMECHANGED for the frame to be redrawn.
+            let (style, _) = style_of(hwnd);
+            let sizing = WS_THICKFRAME | WS_MAXIMIZEBOX;
+            let style = if resizable {
+                style | sizing
+            } else {
+                style & !sizing
+            };
+            unsafe {
+                SetWindowLongW(hwnd, GWL_STYLE, style as i32);
+                SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                );
+            }
+        }
+        WindowCommand::SetMaximized(on) => {
+            unsafe { ShowWindow(hwnd, if on { SW_MAXIMIZE } else { SW_RESTORE }) };
+        }
+        WindowCommand::SetMinimized(on) => {
+            unsafe { ShowWindow(hwnd, if on { SW_MINIMIZE } else { SW_RESTORE }) };
+        }
         _ => {}
     }
+}
+
+/// Converts a physical size to logical units at `scale` (1.0 = 96 dpi).
+fn to_logical(size: PhysicalSize<u32>, scale: f64) -> LogicalSize<f64> {
+    LogicalSize::new(
+        f64::from(size.width) / scale,
+        f64::from(size.height) / scale,
+    )
 }
 
 /// Places the input method's composition and candidate windows at `position`, which is
@@ -819,7 +1035,34 @@ fn set_ime_area(hwnd: HWND, position: PhysicalPosition<i32>, size: PhysicalSize<
 // Backend
 // ---------------------------------------------------------------------------
 
-static REGISTER: Once = Once::new();
+/// Whether the window class is registered. A failed registration is retried by the next
+/// window, so an error is not cached for the rest of the process.
+static REGISTER: Mutex<bool> = Mutex::new(false);
+
+thread_local! {
+    /// The `Arc` reference handed to `CreateWindowExW` that no window has taken yet. Zero once
+    /// `WM_NCCREATE` runs, because the window then owns it. Read after a failed create, to tell
+    /// whether this side still has to give it back.
+    static UNCLAIMED_REF: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    /// The window that currently receives raw mouse input (0 for none).
+    static RAW_MOUSE_OWNER: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// Clears raw mouse registration when `hwnd` is the window that holds it. Registering again
+/// from another window replaces the target, so only the owner may remove it.
+fn release_raw_mouse_if_owner(hwnd: HWND) {
+    if RAW_MOUSE_OWNER.with(|c| c.get()) != hwnd as usize {
+        return;
+    }
+    let mouse = RAWINPUTDEVICE {
+        usUsagePage: 0x01,
+        usUsage: 0x02,
+        dwFlags: RIDEV_REMOVE,
+        hwndTarget: null_mut(),
+    };
+    unsafe { RegisterRawInputDevices(&mouse, 1, size_of::<RAWINPUTDEVICE>() as u32) };
+    RAW_MOUSE_OWNER.with(|c| c.set(0));
+}
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 fn hinstance() -> *mut core::ffi::c_void {
@@ -827,8 +1070,12 @@ fn hinstance() -> *mut core::ffi::c_void {
 }
 
 fn register_class() -> Result<(), WindowError> {
+    let mut registered = REGISTER.lock().unwrap_or_else(|e| e.into_inner());
+    if *registered {
+        return Ok(());
+    }
     let mut result = Ok(());
-    REGISTER.call_once(|| {
+    {
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             style: CS_OWNDC,
@@ -846,7 +1093,8 @@ fn register_class() -> Result<(), WindowError> {
         if unsafe { RegisterClassExW(&wc) } == 0 {
             result = Err(WindowError::Os("RegisterClassExW failed".into()));
         }
-    });
+    }
+    *registered = result.is_ok();
     result
 }
 
@@ -883,16 +1131,7 @@ impl Win32EventLoop {
     }
 
     fn deliver(&self, sink: &mut EventSink<'_>) -> PollStatus {
-        let mut delivered = false;
-        while let Some(ev) = PENDING.with(|p| p.borrow().front()) {
-            match sink.push(ev) {
-                EventStatus::Accepted => {
-                    PENDING.with(|p| p.borrow_mut().pop());
-                    delivered = true;
-                }
-                EventStatus::BufferFull | EventStatus::Captured => break,
-            }
-        }
+        let delivered = PENDING.with(|p| sink.drain_pending(&mut p.borrow_mut()));
         if self.exit.load(Ordering::Acquire) {
             PollStatus::Exit
         } else if delivered {
@@ -912,7 +1151,8 @@ impl EventLoopBackend for Win32EventLoop {
     fn wait(&mut self, sink: &mut EventSink<'_>, timeout: Duration) -> PollStatus {
         let have_pending = PENDING.with(|p| !p.borrow().is_empty());
         if !have_pending {
-            let ms = u32::try_from(timeout.as_millis()).unwrap_or(INFINITE - 1);
+            // Round up: a 0.5 ms request must wait, not spin. Only a zero timeout means no wait.
+            let ms = u32::try_from(timeout.as_nanos().div_ceil(1_000_000)).unwrap_or(INFINITE - 1);
             unsafe { MsgWaitForMultipleObjects(0, null(), 0, ms, QS_ALLINPUT) };
         }
         self.pump();
@@ -969,6 +1209,10 @@ impl EventLoopBackend for Win32EventLoop {
             }),
             cursor_inside: AtomicBool::new(false),
             buttons_down: AtomicU8::new(0),
+            held_keys: Mutex::new(Vec::with_capacity(16)),
+            held_buttons: Mutex::new(Vec::with_capacity(5)),
+            minimized: AtomicBool::new(false),
+            modifiers: AtomicU8::new(0),
             high_surrogate: AtomicU16::new(0),
             last_w: AtomicI32::new(0),
             last_h: AtomicI32::new(0),
@@ -976,6 +1220,7 @@ impl EventLoopBackend for Win32EventLoop {
 
         let title: Vec<u16> = attrs.title.encode_utf16().chain(Some(0)).collect();
         let raw = Arc::into_raw(data.clone());
+        UNCLAIMED_REF.with(|c| c.set(raw as usize));
         let hwnd = unsafe {
             CreateWindowExW(
                 ex,
@@ -1005,13 +1250,19 @@ impl EventLoopBackend for Win32EventLoop {
             unsafe {
                 RegisterRawInputDevices(&mouse, 1, size_of::<RAWINPUTDEVICE>() as u32);
             }
+            RAW_MOUSE_OWNER.with(|c| c.set(hwnd as usize));
         }
         if hwnd.is_null() {
-            // SAFETY: WM_NCCREATE may not have run, so reclaim the reference we leaked.
-            // If it did run, WM_NCDESTROY already released it (hwnd would be non-null then).
-            drop(unsafe { Arc::from_raw(raw) });
+            // If WM_NCCREATE ran, the window took the reference and WM_NCDESTROY, which the
+            // system sends on a failed create, has already released it. Reclaim it only when
+            // nothing took it, so it is never released twice.
+            if UNCLAIMED_REF.with(|c| c.get()) == raw as usize {
+                drop(unsafe { Arc::from_raw(raw) });
+            }
+            UNCLAIMED_REF.with(|c| c.set(0));
             return Err(WindowError::Os("CreateWindowExW failed".into()));
         }
+        UNCLAIMED_REF.with(|c| c.set(0));
 
         let real_dpi = unsafe { GetDpiForWindow(hwnd) };
         let size = client_size(hwnd);
@@ -1080,5 +1331,27 @@ impl Drop for Win32Window {
     fn drop(&mut self) {
         // DestroyWindow must run on the owning thread; ask it to.
         unsafe { PostMessageW(self.hwnd(), WM_TPT_DESTROY, 0, 0) };
+    }
+}
+
+#[cfg(test)]
+mod wm_char_tests {
+    use super::wm_char_to_char;
+
+    #[test]
+    fn plain_bmp_unit_is_its_character() {
+        assert_eq!(wm_char_to_char(0, u16::from(b'a')), Some('a'));
+        assert_eq!(wm_char_to_char(0, 0x00E9), Some('é'));
+    }
+
+    #[test]
+    fn surrogate_pair_joins_into_one_character() {
+        // U+1F600 is D83D DE00.
+        assert_eq!(wm_char_to_char(0xD83D, 0xDE00), Some('\u{1F600}'));
+    }
+
+    #[test]
+    fn lone_low_surrogate_is_dropped_not_nul() {
+        assert_eq!(wm_char_to_char(0, 0xDE00), None);
     }
 }
