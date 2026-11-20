@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-ed25519-dalek = "2"
+ed25519-dalek = "3"
 tpt-window-core = { path = "../tpt-window-core" }
 tpt-window-archon = { path = "../tpt-window-archon" }
 
