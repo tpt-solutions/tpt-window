@@ -20,6 +20,10 @@ uses a named file mapping on Windows.
 cargo test -p tpt-window-memfd
 ```
 
+## Changes
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 Licensed under either of Apache License, Version 2.0 or MIT license, at your option.

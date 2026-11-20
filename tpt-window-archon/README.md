@@ -14,6 +14,11 @@ The capability bridge between [tpt-window](../tpt-window) and
   and a canonical encoding of the event, so altered events, moved events and replays fail.
 - **`router`**: `WindowRouter`, which checks a capability on every delivery and every receive,
   signs what it delivers, and keeps one inbox per window.
+- **`harness`**: a headless harness that checks capability routing and revocation end to end.
+- **`session_log`**: a session log with verification, so a recorded run can be checked afterwards.
+
+Signing keys are zeroized when dropped. The envelope encodes events with `tpt-window-core`'s
+codec.
 
 The router is generic over an `Authority` trait. In tpt-archon that trait is implemented by a
 small adapter over `CapabilityIssuer::authorizes`. That adapter belongs in tpt-archon, and

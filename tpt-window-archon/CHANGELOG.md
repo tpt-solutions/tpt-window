@@ -14,4 +14,8 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - Signed input events (`envelope`): Ed25519, with per-window sequence numbers against
   replay and reordering.
 - `WindowRouter` (`router`): capability-gated delivery and receive over a generic `Authority`.
-- Tests: 10 unit tests and 9 routing tests against a mock authority.
+- `harness` module: a headless harness that checks capability routing and revocation end to end.
+- `session_log` module: a signed session log with verification. The verifier is a fuzz target.
+- Envelopes encode events with `tpt-window-core`'s codec instead of a private encoder.
+- Signing keys are zeroized when dropped.
+- Tests: routing and harness integration tests against a mock authority.

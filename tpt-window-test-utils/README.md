@@ -33,6 +33,11 @@ script side:
 | Method                    | Effect                                                         |
 |---------------------------|----------------------------------------------------------------|
 | `inject(window, event)`   | Queues an event for the next `poll_events` or `step`.           |
+| `inject_at(frame, window, event)` | Queues an event for a given frame number, for scripted runs. |
+| `frame()`                 | Returns the current frame number.                               |
+| `exit_after(frame)`       | Ends the loop after the given frame.                            |
+| `set_monitors(monitors)`  | Sets the monitors the headless loop reports.                    |
+| `captured_commands()`     | Returns the window commands the code under test sent, for assertions. |
 | `reserve(additional)`     | Pre-allocates space in the injection queue before a measured run. |
 
 Because the handle and the loop are separate values, a test can inject events
@@ -54,10 +59,21 @@ from one place and drive the loop from another.
   be tested against the real backend (see the `tests/real_window.rs` files in each
   `tpt-window-sys-*` crate).
 
+## Features
+
+| Feature    | Effect                                                                  |
+|------------|-------------------------------------------------------------------------|
+| `proptest` | `strategies` module: generators for window events, for property tests. |
+
+`scenarios` provides ready-made scripts for a DPI change, two monitors and moving a window
+to another display. `replay(log)` runs a recorded session from `tpt-window-core`'s `record`
+module.
+
 ## Testing
 
 ```sh
 cargo test -p tpt-window-test-utils
+cargo test -p tpt-window-test-utils --features proptest
 ```
 
 ## Documentation

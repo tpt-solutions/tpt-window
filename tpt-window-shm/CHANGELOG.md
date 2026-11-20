@@ -11,5 +11,7 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 ### Added
 - `SharedMemory`: a named Windows file mapping that implements
   `tpt_window_core::channel::RingMemory`, with `create` and `open`.
+- A bare name is placed in the `Local\` namespace.
+- Cross-process test (`tests/cross_process.rs`), using the test binary as the server.
 - Tests: a producer and consumer on two views of one mapping, 50 000 frames in order;
   duplicate names refused; a too-small mapping refused.

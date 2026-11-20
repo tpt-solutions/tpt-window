@@ -8,6 +8,9 @@ creates the mapping and the other opens it by name. The unsafe code for the mapp
 atomic indices and the release/acquire ordering is confined to this crate. Core stays
 `#![forbid(unsafe_code)]`.
 
+A bare name is placed in the `Local\` namespace, so the mapping is visible to processes in the
+same session only.
+
 Status: the transport is tested with a producer and consumer on two separate views of the
 same mapping, and across two processes (the test binary as the server). No
 display-server peer exists yet.
