@@ -1,7 +1,18 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Capability bridge between tpt-window and tpt-archon.
 //!
-//! Three pieces, each usable on its own:
+//! Three things can be built from these pieces, and each is checked by a test:
+//!
+//! - **View-only tokens.** A read-only capability on a window's channel lets an observer
+//!   receive its events and nothing else. The router refuses its input (`tests/harness.rs`,
+//!   `an_agent_without_write_rights_cannot_send_input`).
+//! - **Sandboxed plugin windows.** A window scoped to its own input, with no global input and no
+//!   display device, receives only its own events. Asking for global input also needs read on the
+//!   input device (`tests/routing.rs`, `global_input_needs_the_input_device_read_as_well`).
+//! - **Revocable remote control.** A source's write capability is refused the moment it is
+//!   revoked (`tests/harness.rs`, `a_revoked_agent_is_refused_at_once`).
+//!
+//! The pieces are usable on their own:
 //!
 //! - [`capability`]: the mapping from tpt-window's scopes ([`CapabilityToken`]) onto
 //!   archon's `(Resource, Right)` capabilities. Windows are channels, and the input and
@@ -26,7 +37,9 @@
 
 pub mod capability;
 pub mod envelope;
+pub mod harness;
 pub mod router;
+pub mod session_log;
 
 pub use capability::{Authority, Resource, Right, ScopeError};
 pub use envelope::{EventSigner, EventVerifier, SignedEvent, VerifyError};
