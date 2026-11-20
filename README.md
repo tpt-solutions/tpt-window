@@ -86,6 +86,10 @@ it, so your loop stops; on the web the page must drive `tick` from `requestAnima
 | Tests without a display | `tpt-window-test-utils` (headless backend) |
 | Game controllers, kept out of the window stream | `tpt-window-gamepad` |
 | Capability-gated, signed input for tpt-archon | `tpt-window-archon` |
+| Passing frames between processes on Linux | `tpt-window-memfd` |
+| wgpu surface and device setup | `tpt-window-wgpu` |
+| Bevy ECS integration | `tpt-window-bevy` |
+| An app written against winit 0.30 | `tpt-window-winit-compat` |
 | Passing frames between processes on Windows | `tpt-window-shm` with `tpt-window-core::channel` |
 | `ecs` resources (`WindowResource`, `InputEventQueue`) | `tpt-window-core` with its `ecs` feature |
 
@@ -150,6 +154,9 @@ and has no effect.
 | `tpt-window-archon`      | Capability bridge to tpt-archon: scope mapping, signed input events and a gated router. Works without tpt-archon. |
 | `tpt-window-shm`         | Shared-memory transport for the display protocol (Windows). |
 | `tpt-window-winit-compat` | A winit 0.30 style `ApplicationHandler` and `run_app` over tpt-window's `step` loop, for migrating winit apps. |
+| `tpt-window-memfd`       | Shared-memory transport for the display protocol (Linux). |
+| `tpt-window-wgpu`        | wgpu surface and device helpers for a window. |
+| `tpt-window-bevy`        | Bevy ECS integration: the window, input and event loop as resources. |
 | `tpt-window-bench`       | Benchmark against winit 0.30 on the same loop. Not published. |
 
 Each crate has its own README and CHANGELOG.

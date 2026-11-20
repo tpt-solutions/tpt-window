@@ -71,6 +71,14 @@ The examples in `examples/` show the same pattern:
 ```sh
 cargo run -p tpt-window --example hello_window
 cargo run -p tpt-window --example event_dump
+cargo run -p tpt-window --example input_state
+cargo run -p tpt-window --example multi_window
+cargo run -p tpt-window --example hello_run
+cargo run -p tpt-window --example ime_text_field
+cargo run -p tpt-window --example file_drop
+cargo run -p tpt-window --example record_replay
+cargo run -p tpt-window --features ecs --example ecs_resource
+cargo run -p tpt-window --features gamepad --example gamepad
 ```
 
 ## Platform support
@@ -96,9 +104,13 @@ Held keys send repeated `Pressed` events on Win32, X11 and Wayland.
 
 ## Feature flags
 
-This facade has no feature flags of its own. Engine-facing resource types
-(`WindowResource`, `InputEventQueue`) are behind the `ecs` feature of
-`tpt-window-core`, which you can enable through that crate directly.
+| Feature   | Effect                                                                                  |
+|-----------|-----------------------------------------------------------------------------------------|
+| `ecs`     | Re-exports `WindowResource` and `InputEventQueue` from `tpt-window-core` for ECS engines. |
+| `archon`  | Re-exports the capability bridge as `tpt_window::archon`.                               |
+| `gamepad` | Re-exports gamepad input as `tpt_window::gamepad`.                                      |
+
+None is on by default.
 
 ## Crates in this workspace
 
@@ -110,6 +122,11 @@ This facade has no feature flags of its own. Engine-facing resource types
 | `tpt-window-sys-*`          | Platform backends. Normally used through this facade.               |
 | `tpt-window-test-utils`     | Headless backend for tests, CI and fuzzing.                         |
 | `tpt-window-archon`         | Capability bridge to tpt-archon: scope mapping, signed input events and a gated router. Works without tpt-archon. |
+| `tpt-window-shm`            | Shared-memory transport for the display protocol (Windows).         |
+| `tpt-window-memfd`          | Shared-memory transport for the display protocol (Linux).           |
+| `tpt-window-wgpu`           | wgpu surface and device helpers for a window.                       |
+| `tpt-window-bevy`           | Bevy ECS integration: the window, input and event loop as resources. |
+| `tpt-window-winit-compat`   | A winit 0.30 style `ApplicationHandler` and `run_app` for migrating apps. |
 | `tpt-window-bench`          | Benchmark against winit 0.30 on the same loop. Not published.       |
 
 ## Documentation
