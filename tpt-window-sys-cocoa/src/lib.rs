@@ -48,14 +48,19 @@ use tpt_window_core::*;
 
 thread_local! {
     /// Events waiting for the sink. Filled while AppKit events are translated.
-    static PENDING: RefCell<RingBuffer<Event>> =
-        RefCell::new(RingBuffer::with_capacity(4096).with_policy(OverflowPolicy::DropOldest));
+    static PENDING: RefCell<EventQueue> = RefCell::new(new_pending_queue());
 
     /// Every live window on this thread, with the AppKit object that backs it.
     static WINDOWS: RefCell<Vec<Record>> = const { RefCell::new(Vec::new()) };
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Whether `c` is in the Unicode Private Use Area. AppKit reports arrow, F and navigation
+/// keys as characters from it, so they must not be committed as text.
+fn is_private_use(c: char) -> bool {
+    ('\u{E000}'..='\u{F8FF}').contains(&c)
+}
 
 fn push_event(window: WindowId, event: WindowEvent) {
     PENDING.with(|p| {
@@ -395,10 +400,13 @@ fn translate(record: &Record, event: &NSEvent, mtm: MainThreadMarker) {
                     physical_key: PhysicalKey::Code(code),
                 },
             );
-            if let Some(chars) = event.characters() {
+            // Command shortcuts (Cmd+C, Cmd+Q) are not text input.
+            let command_held = event.modifierFlags().0 & NSEventModifierFlags::Command.0 != 0;
+            if let Some(chars) = event.characters().filter(|_| !command_held) {
                 let text = chars.to_string();
-                // Control characters (arrows, Escape, Return) are not text.
-                if text.chars().all(|c| !c.is_control()) {
+                // Control characters (arrows, Escape, Return) and the Private Use Area that
+                // AppKit uses for function keys (U+F700 and up) are not text.
+                if text.chars().all(|c| !c.is_control() && !is_private_use(c)) {
                     push_text(id, &text);
                 }
             }
@@ -415,6 +423,18 @@ fn translate(record: &Record, event: &NSEvent, mtm: MainThreadMarker) {
             );
         }
         NSEventType::FlagsChanged => {
+            // AppKit sends this only when the modifier flags change, so every one is a change.
+            let flags = event.modifierFlags();
+            let held = |f: NSEventModifierFlags| flags.0 & f.0 != 0;
+            push_event(
+                id,
+                WindowEvent::ModifiersChanged(ModifiersState::new(
+                    held(NSEventModifierFlags::Shift),
+                    held(NSEventModifierFlags::Control),
+                    held(NSEventModifierFlags::Option),
+                    held(NSEventModifierFlags::Command),
+                )),
+            );
             let vk = event.keyCode();
             if let Some(bit) = modifier_device_bit(vk) {
                 let flags: NSEventModifierFlags = event.modifierFlags();
@@ -483,6 +503,46 @@ fn sync_record(record: &Record, mtm: MainThreadMarker) {
                     view.setNeedsDisplay(true);
                 }
             }
+            // Content-size limits, so they match the physical sizes the caller passes.
+            WindowCommand::SetMinSize(m) => {
+                let scale = window.backingScaleFactor();
+                let (w, h) = m.map_or((0.0, 0.0), |m| {
+                    (f64::from(m.width) / scale, f64::from(m.height) / scale)
+                });
+                window.setContentMinSize(NSSize::new(w, h));
+            }
+            WindowCommand::SetMaxSize(m) => {
+                let scale = window.backingScaleFactor();
+                let (w, h) = m.map_or((f64::MAX, f64::MAX), |m| {
+                    (f64::from(m.width) / scale, f64::from(m.height) / scale)
+                });
+                window.setContentMaxSize(NSSize::new(w, h));
+            }
+            WindowCommand::SetResizable(r) => {
+                // Borderless windows have no resize edge, so the mask is only changed with a title bar.
+                let mut style = window.styleMask();
+                if style.0 & NSWindowStyleMask::Titled.0 != 0 {
+                    if r {
+                        style |= NSWindowStyleMask::Resizable;
+                    } else {
+                        style &= !NSWindowStyleMask::Resizable;
+                    }
+                    window.setStyleMask(style);
+                }
+            }
+            WindowCommand::SetMaximized(on) => {
+                // `zoom` toggles, so only call it when the state differs.
+                if window.isZoomed() != on {
+                    window.zoom(None);
+                }
+            }
+            WindowCommand::SetMinimized(on) => {
+                if on {
+                    window.miniaturize(None);
+                } else if window.isMiniaturized() {
+                    window.deminiaturize(None);
+                }
+            }
             _ => {}
         }
     }
@@ -490,7 +550,12 @@ fn sync_record(record: &Record, mtm: MainThreadMarker) {
     // Closed without the delegate's veto (the close button is vetoed, so this is a
     // programmatic close): the window is no longer visible and the app is not hidden.
     let app_hidden = NSApplication::sharedApplication(mtm).isHidden();
-    if data.state.snapshot().visible && !window.isVisible() && !app_hidden {
+    // A minimized window is not visible either, so it is excluded explicitly.
+    if data.state.snapshot().visible
+        && !window.isVisible()
+        && !window.isMiniaturized()
+        && !app_hidden
+    {
         push_event(data.id, WindowEvent::CloseRequested);
         // Let `reap_windows` close the window and report `Destroyed`.
         data.destroy_requested.store(true, Ordering::Release);
@@ -631,16 +696,7 @@ impl MacEventLoop {
         });
         reap_windows(self.mtm);
 
-        let mut delivered = false;
-        while let Some(ev) = PENDING.with(|p| p.borrow().front()) {
-            match sink.push(ev) {
-                EventStatus::Accepted => {
-                    PENDING.with(|p| p.borrow_mut().pop());
-                    delivered = true;
-                }
-                EventStatus::BufferFull | EventStatus::Captured => break,
-            }
-        }
+        let delivered = PENDING.with(|p| sink.drain_pending(&mut p.borrow_mut()));
         if self.exit.load(Ordering::Acquire) {
             PollStatus::Exit
         } else if delivered {
@@ -729,6 +785,9 @@ impl EventLoopBackend for MacEventLoop {
             )
         };
         view.addTrackingArea(&tracking);
+        // Without this, AppKit sends no mouse-moved events unless a button is held, so
+        // `CursorMoved` would be missing for normal pointer movement.
+        window.setAcceptsMouseMovedEvents(true);
 
         let delegate = WindowDelegate::new(mtm, id);
         window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
