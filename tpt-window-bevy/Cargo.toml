@@ -1,0 +1,20 @@
+[package]
+name = "tpt-window-bevy"
+description = "tpt-window-bevy: Bevy ECS resources and a pump system for the tpt-window event loop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["bevy", "ecs", "windowing", "input", "game"]
+categories = ["game-development", "gui"]
+
+[dependencies]
+tpt-window = { path = "../tpt-window", version = "0.1.0" }
+tpt-window-core = { workspace = true, features = ["ecs"] }
+bevy_ecs = "0.16"
+
+[dev-dependencies]
+tpt-window-test-utils = { path = "../tpt-window-test-utils", version = "0.1.0" }

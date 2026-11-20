@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["fuzz"]
 members = [
     "tpt-window",
     "tpt-window-core",
@@ -13,6 +14,10 @@ members = [
     "tpt-window-test-utils",
     "tpt-window-bench",
     "tpt-window-shm",
+    "tpt-window-winit-compat",
+    "tpt-window-memfd",
+    "tpt-window-wgpu",
+    "tpt-window-bevy",
 ]
 
 [workspace.package]

@@ -1,0 +1,15 @@
+[package]
+name = "tpt-window-winit-compat"
+description = "tpt-window-winit-compat: a winit 0.30 style ApplicationHandler over tpt-window's step loop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["winit", "windowing", "migration", "event-loop"]
+categories = ["gui", "game-development"]
+
+[dependencies]
+tpt-window = { path = "../tpt-window", version = "0.1.0" }

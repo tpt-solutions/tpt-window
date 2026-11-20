@@ -1,0 +1,18 @@
+[package]
+name = "tpt-window-wgpu"
+description = "tpt-window-wgpu: wgpu surface and frame helpers for tpt-window windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["wgpu", "gpu", "surface", "rendering", "windowing"]
+categories = ["rendering", "game-development"]
+
+[dependencies]
+tpt-window = { path = "../tpt-window", version = "0.1.0" }
+wgpu = "30"
+pollster = "0.4"
+
