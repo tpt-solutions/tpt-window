@@ -211,6 +211,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: taiki-e/install-action@cargo-fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Confirm cargo-fuzz is on PATH
+        run: cargo +nightly fuzz --version
       - run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60
         working-directory: fuzz
