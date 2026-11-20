@@ -1,0 +1,16 @@
+[package]
+name = "tpt-window-memfd"
+description = "tpt-window-memfd: shared-memory transport for the display protocol on Linux (memfd)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["linux", "shared-memory", "memfd", "ipc", "windowing"]
+categories = ["os::linux-apis", "game-development"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tpt-window-core = { workspace = true }
+libc = "0.2"

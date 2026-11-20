@@ -8,6 +8,22 @@
 //!
 //! This crate holds the unsafe code for the transport, and core stays safe. Windows only.
 //! Dropping a [`SharedMemory`] unmaps its view and closes its handle.
+//!
+//! The creating process makes the mapping, and the other process opens it by the same name.
+//! A bare name is kept in the session's `Local\` namespace:
+//!
+//! ```no_run
+//! use tpt_window_core::channel::FrameRing;
+//! use tpt_window_shm::SharedMemory;
+//!
+//! // Process A: create the ring and reset it once.
+//! let mut ring = FrameRing::new(SharedMemory::create("tpt-display-0", 64 * 1024)?)?;
+//! ring.reset();
+//!
+//! // Process B: open the same name with the same size.
+//! let peer = FrameRing::new(SharedMemory::open("tpt-display-0", 64 * 1024)?)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 #![cfg(windows)]
 #![warn(missing_docs)]
 
