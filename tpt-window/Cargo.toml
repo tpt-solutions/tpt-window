@@ -11,8 +11,20 @@ readme = "README.md"
 keywords = ["windowing", "window", "input", "engine", "surface"]
 categories = ["gui", "game-development"]
 
+[features]
+default = []
+# Engine resources (WindowResource, InputEventQueue) from core.
+ecs = ["tpt-window-core/ecs"]
+# The capability bridge, re-exported as `tpt_window::archon`.
+archon = ["dep:tpt-window-archon"]
+# Gamepad input, re-exported as `tpt_window::gamepad`.
+gamepad = ["dep:tpt-window-gamepad"]
+
 [dependencies]
 tpt-window-core = { workspace = true }
+raw-window-handle = "0.6"
+tpt-window-archon = { path = "../tpt-window-archon", version = "0.1.0", optional = true }
+tpt-window-gamepad = { path = "../tpt-window-gamepad", version = "0.1.0", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 tpt-window-sys-win32 = { path = "../tpt-window-sys-win32", version = "0.1.0" }

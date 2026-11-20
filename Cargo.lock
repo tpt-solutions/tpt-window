@@ -325,6 +325,7 @@ dependencies = [
  "fiat-crypto",
  "rustc_version",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -404,6 +405,7 @@ dependencies = [
  "ed25519",
  "sha2",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -1800,7 +1802,10 @@ dependencies = [
 name = "tpt-window"
 version = "0.1.0"
 dependencies = [
+ "raw-window-handle",
+ "tpt-window-archon",
  "tpt-window-core",
+ "tpt-window-gamepad",
  "tpt-window-sys-cocoa",
  "tpt-window-sys-wasm",
  "tpt-window-sys-wayland",
@@ -1841,6 +1846,14 @@ version = "0.1.0"
 dependencies = [
  "gilrs",
  "tpt-window-core",
+]
+
+[[package]]
+name = "tpt-window-shm"
+version = "0.1.0"
+dependencies = [
+ "tpt-window-core",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2548,3 +2561,9 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "zeroize"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85ccff8a4805aba1eaa4cd4afcd49f7557dd2cf5fd79ffc37f8959466effc5aa"
