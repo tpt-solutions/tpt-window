@@ -37,6 +37,13 @@ want the facade.
 - Raw mouse motion as `WindowEvent::RawMouseMotion` from `WM_INPUT`. Only one
   window per process receives raw motion: the last one created.
 - Resize and move events.
+- Modifier state, reported as `WindowEvent::ModifiersChanged`.
+- Window setters for the core state commands, applied on the loop thread: minimum and maximum
+  size, resizable, maximize, minimize, always on top, decorations, fullscreen, window icon,
+  cursor visibility and cursor grab.
+- Monitor enumeration, the current monitor, theme, and window state read-back.
+- Cross-thread `EventLoopProxy`, which wakes a waiting loop.
+- Vsync control through DWM composition.
 
 ## What is not implemented
 
@@ -47,6 +54,7 @@ want the facade.
 - **`transparent` windows.** Extending the DWM frame into the client area gives a
   white window, not a see-through one. Real transparency needs a DXGI composition
   swapchain with composite alpha, which belongs in the renderer.
+- **Size limits** are set but not tested.
 - **Verification of IME** with a real Japanese or Chinese input method is
   outstanding. The development machine and the CI runners have none installed, so
   the candidate-window placement is checked by reading the IME context back, not by
@@ -73,6 +81,9 @@ The tests create real Win32 windows on the current desktop:
   visible window.
 - `tests/ime_area.rs`: the IME composition and candidate areas set by
   `set_ime_cursor_area`, read back through the window's IME context.
+- `tests/modifiers.rs`, `setters.rs`, `always_on_top.rs`, `cursor.rs`, `grab_icon.rs`,
+  `monitors.rs`, `proxy.rs`, `theme.rs`, `window_state.rs` and `vsync.rs`: the new state
+  commands, monitors, proxy, theme and vsync, each against a real window.
 
 ## Documentation
 

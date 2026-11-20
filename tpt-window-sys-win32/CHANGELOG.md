@@ -22,6 +22,14 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
   applied with `ImmSetCompositionWindow` and `ImmSetCandidateWindow`, so the candidate
   list opens under the text being composed.
 - Build and test as `i686-pc-windows-msvc`, with a CI job.
+- Modifier state as `WindowEvent::ModifiersChanged` (`tests/modifiers.rs`).
+- Window setters for the core state commands: minimum and maximum size, resizable, maximize,
+  minimize, always on top, decorations, fullscreen, window icon, cursor visibility and cursor
+  grab (`tests/setters.rs`, `always_on_top.rs`, `grab_icon.rs`, `cursor.rs`).
+- Monitor enumeration and the current monitor (`tests/monitors.rs`), theme (`tests/theme.rs`)
+  and window state read-back (`tests/window_state.rs`).
+- Cross-thread `EventLoopProxy` that wakes a waiting loop (`tests/proxy.rs`).
+- Vsync control through DWM composition (`tests/vsync.rs`).
 - Tests: `real_window.rs`, `raw_input.rs`, `touch.rs` and `ime_area.rs`.
 
 ### Known gaps
@@ -30,3 +38,4 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - `transparent` windows are not implemented; they need a renderer-side DXGI
   composition swapchain.
 - IME has not been verified with a real input method.
+- Minimum and maximum size limits are set but not tested.
