@@ -32,6 +32,18 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
   with `negotiate` for the version handshake. It has no transport.
 - `Window::set_ime_cursor_area` and `WindowCommand::SetImeCursorArea`, which place the
   IME composition and candidate windows. Applied on Win32; other backends ignore it.
+- `codec` module: binary wire codec for events, with a round-trip test
+  (`tests/codec_roundtrip.rs`).
+- `channel` module: the `RingMemory` trait for shared-memory regions, and `FrameRing` over it
+  for protocol frames.
+- `keymap` module: layout key-code tables used by the backends, tested in the module.
+- `Theme`, `MonitorInfo` and `Icon` (with `IconError`) types.
+- `proxy` module: `EventLoopProxy`, for waking the loop from another thread.
+- `record` and `tap` modules: record events to a log and replay them, and observe events as
+  they pass through the sink.
+- `WindowEvent::ModifiersChanged` and input state tracking in `input`.
+- `PathAssembler` for file-drop paths, and `ImeText` alongside `InlineText`.
+- `WindowCommand` variants for minimum and maximum size, resizable, maximized and minimized.
 
 ### Changed
 - Uses `web-time` on `wasm32`, because `std::time::Instant` panics in browsers.

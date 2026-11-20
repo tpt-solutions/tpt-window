@@ -23,6 +23,14 @@ engine integration that must not pull in a platform backend.
 | `dpi`           | `PhysicalSize`, `LogicalSize`, `PhysicalPosition`, `LogicalPosition`.           |
 | `security`      | `CapabilityToken`, `WindowScope`, `InputScope`, `DisplayScope`, `SurfaceHandle`. |
 | `protocol`      | Version 1 wire format for the display-server protocol: `Message`, `encode`, a length-checked decoder, and `negotiate`. It has no transport. |
+| `codec`         | Binary wire codec for events, with a round-trip test.                           |
+| `channel`       | `RingMemory`, the trait for shared-memory regions, and `FrameRing` over it.     |
+| `keymap`        | Layout key-code tables used by the backends.                                    |
+| `theme`         | `Theme` (light or dark).                                                        |
+| `monitor`       | `MonitorInfo`.                                                                  |
+| `icon`          | `Icon` and `IconError` for window icons.                                        |
+| `proxy`         | `EventLoopProxy`, for waking the loop from another thread.                      |
+| `record`, `tap` | Record events to a log and replay them; observe events as they pass.            |
 | `ids`           | `WindowId`.                                                                     |
 | `error`         | `WindowError`.                                                                  |
 | `ecs` (feature) | `WindowResource` and `InputEventQueue` for ECS engines.                         |
@@ -92,7 +100,7 @@ cargo test -p tpt-window-core --features ecs
 
 The tests cover ring-buffer and event-queue behaviour under property tests
 (`tests/properties.rs`) and an allocation-counting check that the event hot path makes no heap
-allocations (`tests/rt_safety.rs`).
+allocations (`tests/rt_safety.rs`). Wire-codec round trips are in `tests/codec_roundtrip.rs`.
 
 ## Documentation
 
