@@ -14,5 +14,5 @@ categories = ["rendering", "game-development"]
 [dependencies]
 tpt-window = { path = "../tpt-window", version = "0.1.0" }
 wgpu = "30"
-pollster = "0.4"
+pollster = "1.0"
 
