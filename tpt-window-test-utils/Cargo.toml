@@ -16,3 +16,11 @@ tpt-window-core = { workspace = true }
 
 [dev-dependencies]
 tpt-window-core = { workspace = true, features = ["ecs"] }
+
+[features]
+# Strategies that generate window events for property tests.
+proptest = ["dep:proptest"]
+
+[dependencies.proptest]
+version = "1"
+optional = true
