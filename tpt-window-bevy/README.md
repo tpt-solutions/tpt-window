@@ -13,6 +13,12 @@ schedule.run(&mut world); // once per frame, on the thread that created the loop
 
 The event loop is a non-send resource, so the schedule must run on that thread.
 
+Built on `bevy_ecs` 0.16.
+
+## Changes
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## Testing
 
 ```sh

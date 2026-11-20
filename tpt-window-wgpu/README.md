@@ -24,6 +24,10 @@ cargo run -p tpt-window-wgpu --example wgpu_triangle
 The example was run for three seconds on a GPU (NVIDIA, Windows) without errors. Its picture was
 not checked by eye.
 
+## Changes
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 Licensed under either of Apache License, Version 2.0 or MIT license, at your option.

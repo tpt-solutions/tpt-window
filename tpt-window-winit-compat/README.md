@@ -36,8 +36,9 @@ run_app(&mut App::default()).unwrap();
 
 - **Windows are created with `ctx.create_window`** and returned as `tpt_window::Window`. Dropping
   the handle closes the window, as in tpt-window everywhere.
-- **Idle wakes are fixed.** winit's `ControlFlow` (`Wait`, `Poll`, `WaitUntil`) is not provided.
-  The loop waits for events and wakes at least every `IDLE_WAIT`.
+- **Control flow.** `ControlFlow` (`Wait`, `Poll`, `WaitUntil`) is set with
+  `ctx.set_control_flow`, as in winit. With `Wait`, the loop still wakes at least every
+  `IDLE_WAIT` (16 ms) so `about_to_wait` keeps running.
 - **No user events.** Use `ctx.proxy()` to wake the loop or stop it from another thread. The
   proxy wakes the loop at once on Win32 and at the next idle tick elsewhere.
 - **Types are tpt-window's.** `WindowEvent`, `WindowId` and `WindowBuilder` come from
@@ -45,6 +46,10 @@ run_app(&mut App::default()).unwrap();
   for the event mapping.
 - **Yield points are skipped.** tpt-window's per-frame `YieldPoint` events are not passed to
   the handler.
+
+## Changes
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## Testing
 
