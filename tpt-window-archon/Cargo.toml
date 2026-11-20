@@ -13,4 +13,4 @@ categories = ["os", "gui"]
 
 [dependencies]
 tpt-window-core = { workspace = true }
-ed25519-dalek = { version = "2", default-features = false }
+ed25519-dalek = { version = "2", default-features = false, features = ["zeroize"] }

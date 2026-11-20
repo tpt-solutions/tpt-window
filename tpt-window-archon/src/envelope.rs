@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use tpt_window_core::{
     ElementState, GamepadId, ImeEvent, KeyCode, MouseButton, MouseScrollDelta, PhysicalKey,
     PhysicalPosition, PhysicalSize, TouchEvent, TouchPhase, WindowEvent, WindowId,
@@ -125,8 +125,10 @@ impl EventVerifier {
     pub fn verify(&mut self, signed: &SignedEvent) -> Result<WindowEvent, VerifyError> {
         let message = signing_bytes(signed.window, signed.seq, &signed.event);
         let signature = Signature::from_bytes(&signed.signature);
+        // `verify_strict` also rejects non-canonical signatures and small-order keys, so one
+        // signed event has exactly one accepted encoding.
         self.key
-            .verify(&message, &signature)
+            .verify_strict(&message, &signature)
             .map_err(|_| VerifyError::BadSignature)?;
 
         let last = self.last_seq.get(&signed.window).copied().unwrap_or(0);
@@ -215,9 +217,148 @@ fn put_phase(out: &mut Vec<u8>, p: TouchPhase) {
         },
     );
 }
+/// Tag for a key this crate does not know yet. `KeyCode` is `#[non_exhaustive]`, so a variant
+/// added in core must get a row in [`key_tag`]. Until it does, every such key shares this tag
+/// and cannot be told apart in the signed bytes. The test `key_tags_are_unique` guards the
+/// known rows.
+const UNKNOWN_KEY_TAG: u32 = u32::MAX;
+
+/// Stable wire tag for a key. These numbers are part of the signed bytes, so they are written
+/// out here and never derived from the enum's declaration order. Reordering the variants of
+/// `KeyCode` therefore cannot change a signature.
+fn key_tag(k: KeyCode) -> u32 {
+    match k {
+        KeyCode::A => 0,
+        KeyCode::B => 1,
+        KeyCode::C => 2,
+        KeyCode::D => 3,
+        KeyCode::E => 4,
+        KeyCode::F => 5,
+        KeyCode::G => 6,
+        KeyCode::H => 7,
+        KeyCode::I => 8,
+        KeyCode::J => 9,
+        KeyCode::K => 10,
+        KeyCode::L => 11,
+        KeyCode::M => 12,
+        KeyCode::N => 13,
+        KeyCode::O => 14,
+        KeyCode::P => 15,
+        KeyCode::Q => 16,
+        KeyCode::R => 17,
+        KeyCode::S => 18,
+        KeyCode::T => 19,
+        KeyCode::U => 20,
+        KeyCode::V => 21,
+        KeyCode::W => 22,
+        KeyCode::X => 23,
+        KeyCode::Y => 24,
+        KeyCode::Z => 25,
+        KeyCode::Digit0 => 26,
+        KeyCode::Digit1 => 27,
+        KeyCode::Digit2 => 28,
+        KeyCode::Digit3 => 29,
+        KeyCode::Digit4 => 30,
+        KeyCode::Digit5 => 31,
+        KeyCode::Digit6 => 32,
+        KeyCode::Digit7 => 33,
+        KeyCode::Digit8 => 34,
+        KeyCode::Digit9 => 35,
+        KeyCode::F1 => 36,
+        KeyCode::F2 => 37,
+        KeyCode::F3 => 38,
+        KeyCode::F4 => 39,
+        KeyCode::F5 => 40,
+        KeyCode::F6 => 41,
+        KeyCode::F7 => 42,
+        KeyCode::F8 => 43,
+        KeyCode::F9 => 44,
+        KeyCode::F10 => 45,
+        KeyCode::F11 => 46,
+        KeyCode::F12 => 47,
+        KeyCode::ArrowUp => 48,
+        KeyCode::ArrowDown => 49,
+        KeyCode::ArrowLeft => 50,
+        KeyCode::ArrowRight => 51,
+        KeyCode::Escape => 52,
+        KeyCode::Enter => 53,
+        KeyCode::Space => 54,
+        KeyCode::Tab => 55,
+        KeyCode::Backspace => 56,
+        KeyCode::Delete => 57,
+        KeyCode::Insert => 58,
+        KeyCode::Home => 59,
+        KeyCode::End => 60,
+        KeyCode::PageUp => 61,
+        KeyCode::PageDown => 62,
+        KeyCode::ShiftLeft => 63,
+        KeyCode::ShiftRight => 64,
+        KeyCode::ControlLeft => 65,
+        KeyCode::ControlRight => 66,
+        KeyCode::AltLeft => 67,
+        KeyCode::AltRight => 68,
+        KeyCode::SuperLeft => 69,
+        KeyCode::SuperRight => 70,
+        KeyCode::CapsLock => 71,
+        KeyCode::Minus => 72,
+        KeyCode::Equal => 73,
+        KeyCode::BracketLeft => 74,
+        KeyCode::BracketRight => 75,
+        KeyCode::Backslash => 76,
+        KeyCode::Semicolon => 77,
+        KeyCode::Quote => 78,
+        KeyCode::Backquote => 79,
+        KeyCode::Comma => 80,
+        KeyCode::Period => 81,
+        KeyCode::Slash => 82,
+        KeyCode::Numpad0 => 83,
+        KeyCode::Numpad1 => 84,
+        KeyCode::Numpad2 => 85,
+        KeyCode::Numpad3 => 86,
+        KeyCode::Numpad4 => 87,
+        KeyCode::Numpad5 => 88,
+        KeyCode::Numpad6 => 89,
+        KeyCode::Numpad7 => 90,
+        KeyCode::Numpad8 => 91,
+        KeyCode::Numpad9 => 92,
+        KeyCode::NumpadAdd => 93,
+        KeyCode::NumpadSubtract => 94,
+        KeyCode::NumpadMultiply => 95,
+        KeyCode::NumpadDivide => 96,
+        KeyCode::NumpadEnter => 97,
+        KeyCode::NumpadDecimal => 98,
+        KeyCode::Unidentified => 99,
+        KeyCode::NumLock => 100,
+        KeyCode::ScrollLock => 101,
+        KeyCode::PrintScreen => 102,
+        KeyCode::Pause => 103,
+        KeyCode::Menu => 104,
+        KeyCode::F13 => 105,
+        KeyCode::F14 => 106,
+        KeyCode::F15 => 107,
+        KeyCode::F16 => 108,
+        KeyCode::F17 => 109,
+        KeyCode::F18 => 110,
+        KeyCode::F19 => 111,
+        KeyCode::F20 => 112,
+        KeyCode::F21 => 113,
+        KeyCode::F22 => 114,
+        KeyCode::F23 => 115,
+        KeyCode::F24 => 116,
+        KeyCode::IntlBackslash => 117,
+        KeyCode::MediaPlayPause => 118,
+        KeyCode::MediaStop => 119,
+        KeyCode::MediaTrackNext => 120,
+        KeyCode::MediaTrackPrevious => 121,
+        KeyCode::AudioVolumeUp => 122,
+        KeyCode::AudioVolumeDown => 123,
+        KeyCode::AudioVolumeMute => 124,
+        _ => UNKNOWN_KEY_TAG,
+    }
+}
+
 fn put_key(out: &mut Vec<u8>, k: KeyCode) {
-    // Unit-only enum: the discriminant is stable within one release of this crate.
-    put_u32(out, k as u32);
+    put_u32(out, key_tag(k));
 }
 fn put_physical(out: &mut Vec<u8>, k: PhysicalKey) {
     match k {
@@ -302,6 +443,11 @@ fn encode_event(event: &WindowEvent, out: &mut Vec<u8>) {
         WindowEvent::Occluded(v) => {
             put_u8(out, 6);
             put_bool(out, *v);
+        }
+        WindowEvent::ModifiersChanged(mods) => {
+            // Tag 64, away from the dense range the other variants use.
+            put_u8(out, 64);
+            put_u8(out, mods.bits());
         }
         WindowEvent::KeyboardInput {
             state,
@@ -558,5 +704,24 @@ mod tests {
         for (a, b) in pairs {
             assert_ne!(encode(&a), encode(&b), "{a:?} vs {b:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod key_tag_tests {
+    use super::*;
+
+    #[test]
+    fn key_tags_are_stable_for_known_keys() {
+        // These values are part of existing signatures. Changing one breaks verification.
+        assert_eq!(key_tag(KeyCode::A), 0);
+        assert_eq!(key_tag(KeyCode::B), 1);
+        assert_eq!(key_tag(KeyCode::NumpadDecimal), 98);
+        assert_eq!(key_tag(KeyCode::Unidentified), 99);
+        assert_ne!(key_tag(KeyCode::A), key_tag(KeyCode::B));
+        // Keys added after the first release get rows of their own, not the unknown tag.
+        assert_eq!(key_tag(KeyCode::NumLock), 100);
+        assert_eq!(key_tag(KeyCode::F24), 100 + 16);
+        assert_ne!(key_tag(KeyCode::MediaStop), UNKNOWN_KEY_TAG);
     }
 }

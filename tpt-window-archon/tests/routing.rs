@@ -110,7 +110,13 @@ fn setup() -> (Shared, WindowRouter<Shared>) {
 fn owner_receives_verified_events_from_an_authorized_source() {
     let (issuer, mut router) = setup();
     let win = WindowId(1);
-    router.open_window(win, plain_scope()).unwrap();
+    router
+        .open_window(
+            &[issuer.mint(Resource::Channel(win.0), Right::ReadWrite)],
+            win,
+            plain_scope(),
+        )
+        .unwrap();
 
     let source = issuer.mint(Resource::Channel(win.0), Right::Write);
     let owner = issuer.mint(Resource::Channel(win.0), Right::Read);
@@ -135,7 +141,13 @@ fn owner_receives_verified_events_from_an_authorized_source() {
 fn delivery_needs_a_write_capability_on_the_window_channel() {
     let (issuer, mut router) = setup();
     let win = WindowId(1);
-    router.open_window(win, plain_scope()).unwrap();
+    router
+        .open_window(
+            &[issuer.mint(Resource::Channel(win.0), Right::ReadWrite)],
+            win,
+            plain_scope(),
+        )
+        .unwrap();
 
     let read_only = issuer.mint(Resource::Channel(win.0), Right::Read);
     assert_eq!(
@@ -157,7 +169,13 @@ fn delivery_needs_a_write_capability_on_the_window_channel() {
 fn receive_needs_a_read_capability_on_the_window_channel() {
     let (issuer, mut router) = setup();
     let win = WindowId(1);
-    router.open_window(win, plain_scope()).unwrap();
+    router
+        .open_window(
+            &[issuer.mint(Resource::Channel(win.0), Right::ReadWrite)],
+            win,
+            plain_scope(),
+        )
+        .unwrap();
     let source = issuer.mint(Resource::Channel(win.0), Right::Write);
     router
         .deliver(&[source], win, key_press(KeyCode::A))
@@ -174,7 +192,13 @@ fn receive_needs_a_read_capability_on_the_window_channel() {
 fn revoked_capabilities_stop_working_at_both_ends() {
     let (issuer, mut router) = setup();
     let win = WindowId(4);
-    router.open_window(win, plain_scope()).unwrap();
+    router
+        .open_window(
+            &[issuer.mint(Resource::Channel(win.0), Right::ReadWrite)],
+            win,
+            plain_scope(),
+        )
+        .unwrap();
 
     let source = issuer.mint(Resource::Channel(win.0), Right::Write);
     let owner = issuer.mint(Resource::Channel(win.0), Right::Read);
@@ -200,7 +224,13 @@ fn global_input_needs_the_input_device_read_as_well() {
         input_scope: InputScope::Global,
         ..plain_scope()
     };
-    router.open_window(win, scope).unwrap();
+    router
+        .open_window(
+            &[issuer.mint(Resource::Channel(win.0), Right::ReadWrite)],
+            win,
+            scope,
+        )
+        .unwrap();
 
     let owner = issuer.mint(Resource::Channel(win.0), Right::Read);
     assert_eq!(
@@ -221,7 +251,13 @@ fn any_display_needs_the_display_device_read() {
         display_scope: DisplayScope::Any,
         ..plain_scope()
     };
-    router.open_window(win, scope).unwrap();
+    router
+        .open_window(
+            &[issuer.mint(Resource::Channel(win.0), Right::ReadWrite)],
+            win,
+            scope,
+        )
+        .unwrap();
 
     let owner = issuer.mint(Resource::Channel(win.0), Right::Read);
     assert_eq!(router.receive(&[owner], win), Err(RouteError::Denied));
@@ -231,13 +267,17 @@ fn any_display_needs_the_display_device_read() {
 
 #[test]
 fn unroutable_scopes_are_rejected_when_the_window_opens() {
-    let (_issuer, mut router) = setup();
+    let (issuer, mut router) = setup();
     let scope = CapabilityToken {
         input_scope: InputScope::WindowAndChildren,
         ..plain_scope()
     };
     assert!(matches!(
-        router.open_window(WindowId(1), scope),
+        router.open_window(
+            &[issuer.mint(Resource::Channel(WindowId(1).0), Right::ReadWrite)],
+            WindowId(1),
+            scope,
+        ),
         Err(RouteError::Scope(_))
     ));
     let scope = CapabilityToken {
@@ -245,7 +285,11 @@ fn unroutable_scopes_are_rejected_when_the_window_opens() {
         ..plain_scope()
     };
     assert!(matches!(
-        router.open_window(WindowId(1), scope),
+        router.open_window(
+            &[issuer.mint(Resource::Channel(WindowId(1).0), Right::ReadWrite)],
+            WindowId(1),
+            scope,
+        ),
         Err(RouteError::Scope(_))
     ));
 }
@@ -262,7 +306,13 @@ fn unknown_and_closed_windows_are_errors() {
         Err(RouteError::NoSuchWindow(win))
     );
 
-    router.open_window(win, plain_scope()).unwrap();
+    router
+        .open_window(
+            &[issuer.mint(Resource::Channel(win.0), Right::ReadWrite)],
+            win,
+            plain_scope(),
+        )
+        .unwrap();
     router
         .deliver(&[source], win, key_press(KeyCode::A))
         .unwrap();
@@ -279,8 +329,20 @@ fn an_event_cannot_be_moved_to_another_window() {
     // and presents it as input for window B. The signature covers the window id, so it fails.
     let (issuer, mut router) = setup();
     let (a, b) = (WindowId(10), WindowId(11));
-    router.open_window(a, plain_scope()).unwrap();
-    router.open_window(b, plain_scope()).unwrap();
+    router
+        .open_window(
+            &[issuer.mint(Resource::Channel(a.0), Right::ReadWrite)],
+            a,
+            plain_scope(),
+        )
+        .unwrap();
+    router
+        .open_window(
+            &[issuer.mint(Resource::Channel(b.0), Right::ReadWrite)],
+            b,
+            plain_scope(),
+        )
+        .unwrap();
 
     let src_a = issuer.mint(Resource::Channel(a.0), Right::Write);
     let owner_a = issuer.mint(Resource::Channel(a.0), Right::Read);
@@ -291,4 +353,52 @@ fn an_event_cannot_be_moved_to_another_window() {
 
     let mut verifier_b = EventVerifier::new(router.verifying_key());
     assert!(verifier_b.verify(&moved).is_err());
+}
+
+#[test]
+fn opening_a_window_needs_a_capability_for_its_channel() {
+    let (issuer, mut router) = setup();
+    let win = WindowId(7);
+    // No owner capability at all, and a capability for some other window: both refused.
+    assert_eq!(
+        router.open_window(&[], win, plain_scope()),
+        Err(RouteError::Denied)
+    );
+    let other = issuer.mint(Resource::Channel(8), Right::ReadWrite);
+    assert_eq!(
+        router.open_window(&[other], win, plain_scope()),
+        Err(RouteError::Denied)
+    );
+    let owner = issuer.mint(Resource::Channel(win.0), Right::Read);
+    assert!(router.open_window(&[owner], win, plain_scope()).is_ok());
+}
+
+#[test]
+fn a_full_inbox_refuses_events_without_using_a_sequence_number() {
+    let (issuer, mut router) = setup();
+    let win = WindowId(1);
+    let owner = issuer.mint(Resource::Channel(win.0), Right::Read);
+    router.open_window(&[owner], win, plain_scope()).unwrap();
+    let source = issuer.mint(Resource::Channel(win.0), Right::Write);
+
+    for _ in 0..tpt_window_archon::router::INBOX_CAPACITY {
+        router
+            .deliver(&[source], win, key_press(KeyCode::A))
+            .unwrap();
+    }
+    assert_eq!(
+        router.deliver(&[source], win, key_press(KeyCode::A)),
+        Err(RouteError::InboxFull)
+    );
+
+    // Drain, then the next event must carry the sequence number right after the last one
+    // delivered: the refused event did not consume one.
+    let drained = router.receive(&[owner], win).unwrap();
+    assert_eq!(drained.len(), tpt_window_archon::router::INBOX_CAPACITY);
+    router
+        .deliver(&[source], win, key_press(KeyCode::B))
+        .unwrap();
+    let next = router.receive(&[owner], win).unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].seq, drained.last().unwrap().seq + 1);
 }
