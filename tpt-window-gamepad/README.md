@@ -20,14 +20,14 @@ use tpt_window_gamepad::{GamepadEvent, Gamepads};
 let mut pads = Gamepads::new().expect("gamepad backend");
 let mut events = Vec::new();
 
-loop {
+for _frame in 0..600 {
     pads.poll(&mut events); // call once per frame; never blocks
     for ev in events.drain(..) {
         if let GamepadEvent::Button { button, pressed: true, .. } = ev {
             println!("pressed {button:?}");
         }
     }
-    # break;
+    // ...update and render here, then wait for the next frame.
 }
 ```
 

@@ -22,6 +22,7 @@
 //! ```
 #![warn(missing_docs)]
 
+use std::collections::HashMap;
 use std::fmt;
 
 use gilrs::{Axis, Button, EventType, Gilrs};
@@ -141,20 +142,44 @@ impl std::error::Error for GamepadError {}
 /// The connected gamepads. Create one and call [`Gamepads::poll`] once per frame.
 pub struct Gamepads {
     gilrs: Gilrs,
+    /// Stable ids handed out so far. A gilrs id is mapped to one of these the first time it is
+    /// seen, and the mapping is never removed, so an id is not reused while the program runs.
+    ids: HashMap<gilrs::GamepadId, GamepadId>,
+    next_id: u32,
 }
 
 impl Gamepads {
     /// Starts the platform gamepad backend.
     pub fn new() -> Result<Self, GamepadError> {
         Gilrs::new()
-            .map(|gilrs| Self { gilrs })
+            .map(|gilrs| Self {
+                gilrs,
+                ids: HashMap::new(),
+                next_id: 0,
+            })
             .map_err(|e| GamepadError(e.to_string()))
+    }
+
+    /// The stable id for a gilrs id, assigned on first sight.
+    fn id_for(&mut self, id: gilrs::GamepadId) -> GamepadId {
+        if let Some(&mapped) = self.ids.get(&id) {
+            return mapped;
+        }
+        let mapped = GamepadId(self.next_id);
+        // Running out of 32-bit ids would take 4 billion distinct pads. Stop rather than wrap
+        // around and hand out an id that is already in use.
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("gamepad id space exhausted");
+        self.ids.insert(id, mapped);
+        mapped
     }
 
     /// Appends every change since the last call to `out`. Never blocks.
     pub fn poll(&mut self, out: &mut Vec<GamepadEvent>) {
         while let Some(ev) = self.gilrs.next_event() {
-            let id = map_id(ev.id);
+            let id = self.id_for(ev.id);
             match ev.event {
                 EventType::Connected => out.push(GamepadEvent::Connected(id)),
                 EventType::Disconnected => out.push(GamepadEvent::Disconnected(id)),
@@ -178,12 +203,6 @@ impl Gamepads {
             }
         }
     }
-}
-
-/// Maps a gilrs id to a stable tpt-window id. gilrs ids are small indices, so the
-/// truncation to 32 bits does not collide in practice.
-fn map_id(id: gilrs::GamepadId) -> GamepadId {
-    GamepadId(usize::from(id) as u32)
 }
 
 fn map_button(b: Button) -> GamepadButton {
