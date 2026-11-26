@@ -15,3 +15,7 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - Cross-process test (`tests/cross_process.rs`), using the test binary as the server.
 - Tests: a producer and consumer on two views of one mapping, 50 000 frames in order;
   duplicate names refused; a too-small mapping refused.
+
+### Fixed
+- The crate doc example builds on non-Windows targets, so `cargo test` passes there.
+- A broken intra-doc link in the crate docs is fixed.

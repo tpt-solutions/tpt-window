@@ -1,6 +1,6 @@
 # tpt-window-test-utils
 
-A headless [tpt-window](../tpt-window) backend for tests, CI and fuzzing. It opens
+A headless [tpt-window](../tpt-window) backend for tests and CI. It opens
 no OS window. Instead, the test script injects events, and the code under test
 reads them back through the same `EventLoop` and `EventQueue` that a real backend
 uses.
@@ -50,7 +50,8 @@ from one place and drive the loop from another.
 - **Yield-point contracts.** `tests/yield_sync.rs` checks the frame-boundary
   behaviour of `YieldPoint`: one yield per poll, the last one in each batch,
   numbered in order, and lost yields counted in `dropped()`.
-- **Fuzzing** the event path with arbitrary injected sequences.
+- **Property tests**, with the optional `proptest` feature: strategies that generate window
+  events (`tests/strategies.rs`).
 
 ## Limits
 

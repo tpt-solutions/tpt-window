@@ -15,7 +15,7 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - `requestAnimationFrame`-driven redraw.
 - Browser check harness in `browser-check/`: runs the backend in Chromium through
   Playwright and checks pointer, wheel, keyboard, committed text and canvas resize.
-  It is not part of the workspace and is not run in CI.
+  It is not part of the workspace. CI runs it in a `browser` job, in Chromium, after building the wasm harness.
 - Window state, cursor, icon, monitor, theme and proxy support from the expanded core API.
   Compile-checked; the browser check covers input and resize only.
 

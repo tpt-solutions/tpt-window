@@ -1,8 +1,8 @@
 # Browser check for the web backend
 
 Runs `tpt-window-sys-wasm` in a real browser and checks the events it reports for pointer,
-keyboard, text, wheel and canvas resize. It is not part of the workspace and is not run in
-CI, because it needs a browser.
+keyboard, text, wheel and canvas resize. It is not part of the workspace. CI runs it in the
+`browser` job, in Chromium, after building the wasm harness.
 
 ## Run
 

@@ -15,6 +15,7 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - `GpuSurface::acquire` and `Frame::present`. `acquire` returns `None` when no frame is
   available, so the loop can skip it.
 - `GpuError` for surface and adapter failures.
+- Depends on `pollster` 1.0 to block on adapter and device requests in `create`.
 - `wgpu_triangle` example. It ran for three seconds on an NVIDIA GPU on Windows without
   errors; the picture was not checked by eye.
 

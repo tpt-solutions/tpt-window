@@ -44,6 +44,8 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - `WindowEvent::ModifiersChanged` and input state tracking in `input`.
 - `PathAssembler` for file-drop paths, and `ImeText` alongside `InlineText`.
 - `WindowCommand` variants for minimum and maximum size, resizable, maximized and minimized.
+- Fuzz targets for the codec, the protocol decoder, the frame ring and the session-log verifier,
+  in the workspace's `fuzz/` directory. CI runs each for a minute on nightly.
 
 ### Changed
 - Uses `web-time` on `wasm32`, because `std::time::Instant` panics in browsers.
@@ -51,3 +53,7 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - `PROTOCOL_VERSION` is 1. It was 0 while the protocol was a skeleton.
 - Public `KeyCode` variants and the DPI pair fields are documented. The crate passes
   `missing_docs` without suppression.
+- The codec rejects a `ModifiersChanged` byte with bits outside the four modifier flags
+  (`CodecError::BadValue`). Such a byte used to decode by masking, so re-encoding gave
+  different bytes. The public `ModifiersState::from_bits` still masks. Found by the
+  `codec_decode` fuzz target.

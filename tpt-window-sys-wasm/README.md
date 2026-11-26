@@ -51,8 +51,8 @@ cargo check -p tpt-window-sys-wasm --target wasm32-unknown-unknown
 ```
 
 The browser check in [`browser-check/`](browser-check/README.md) runs the backend in
-Chromium through Playwright. It is a separate crate outside the workspace, and it is
-not run in CI because it needs a browser.
+Chromium through Playwright. It is a separate crate outside the workspace. CI runs it in
+the `browser` job.
 
 ## Documentation
 

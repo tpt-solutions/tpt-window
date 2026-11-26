@@ -22,3 +22,7 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - Examples: `multi_window`, `hello_run`, `input_state`, `ecs_resource`, `file_drop`, `gamepad`,
   `ime_text_field` and `record_replay`.
 - Surface target test (`tests/surface_target.rs`).
+
+### Changed
+- The event codec (in `tpt-window-core`) rejects a `ModifiersChanged` byte with bits outside
+  the four modifier flags. Such bytes were accepted before and are now an error.

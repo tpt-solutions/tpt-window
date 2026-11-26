@@ -149,7 +149,7 @@ and has no effect.
 | `tpt-window-sys-x11`     | X11 backend. |
 | `tpt-window-sys-wayland` | Wayland backend. |
 | `tpt-window-sys-wasm`    | Web backend. |
-| `tpt-window-test-utils`  | Headless backend for tests, CI and fuzzing. |
+| `tpt-window-test-utils`  | Headless backend for tests and CI. |
 | `tpt-window-gamepad`     | Optional gamepad input over `gilrs`. Not part of the windowing layer. |
 | `tpt-window-archon`      | Capability bridge to tpt-archon: scope mapping, signed input events and a gated router. Works without tpt-archon. |
 | `tpt-window-shm`         | Shared-memory transport for the display protocol (Windows). |
@@ -171,7 +171,15 @@ cargo deny check
 Platform-specific tests need the matching desktop, so run the Win32 tests on Windows
 and the X11 and Wayland tests on Linux. CI covers the rest. The web backend builds
 with `cargo check -p tpt-window-sys-wasm --target wasm32-unknown-unknown`, and its
-Chromium check is in `tpt-window-sys-wasm/browser-check/`.
+Chromium check in `tpt-window-sys-wasm/browser-check/` runs in CI.
+
+Fuzz targets for the codec, the protocol decoder, the frame ring and the session-log
+verifier live in `fuzz/`. They need nightly and `cargo-fuzz`:
+
+```sh
+cd fuzz
+cargo +nightly fuzz run codec_decode -- -max_total_time=60
+```
 
 ## Documentation
 

@@ -19,3 +19,4 @@ this crate follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). B
 - Envelopes encode events with `tpt-window-core`'s codec instead of a private encoder.
 - Signing keys are zeroized when dropped.
 - Tests: routing and harness integration tests against a mock authority.
+- Depends on `ed25519-dalek` 3. The session-log fuzz target uses the same version.

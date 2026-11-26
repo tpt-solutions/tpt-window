@@ -23,7 +23,7 @@ engine integration that must not pull in a platform backend.
 | `dpi`           | `PhysicalSize`, `LogicalSize`, `PhysicalPosition`, `LogicalPosition`.           |
 | `security`      | `CapabilityToken`, `WindowScope`, `InputScope`, `DisplayScope`, `SurfaceHandle`. |
 | `protocol`      | Version 1 wire format for the display-server protocol: `Message`, `encode`, a length-checked decoder, and `negotiate`. It has no transport. |
-| `codec`         | Binary wire codec for events, with a round-trip test.                           |
+| `codec`         | Binary wire codec for events. Decoding rejects bytes the encoder never writes, and has a round-trip test. |
 | `channel`       | `RingMemory`, the trait for shared-memory regions, and `FrameRing` over it.     |
 | `keymap`        | Layout key-code tables used by the backends.                                    |
 | `theme`         | `Theme` (light or dark).                                                        |
@@ -101,6 +101,8 @@ cargo test -p tpt-window-core --features ecs
 The tests cover ring-buffer and event-queue behaviour under property tests
 (`tests/properties.rs`) and an allocation-counting check that the event hot path makes no heap
 allocations (`tests/rt_safety.rs`). Wire-codec round trips are in `tests/codec_roundtrip.rs`.
+The codec and protocol decoders are also fuzzed; the targets are in the workspace's `fuzz/`
+directory and run on nightly.
 
 ## Documentation
 
